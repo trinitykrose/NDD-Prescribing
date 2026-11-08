@@ -15,8 +15,8 @@ Run in order. Notebooks are Python, the modelling file is R.
 | 2 | `2_EPD_download.ipynb` | Downloads English Prescribing Data (EPD), merges all years, filters to relevant items | ~3 hours |
 | 3 | `3_GP_reg_wf_download.ipynb` | Downloads and processes GP registered patients and GP workforce | ~15 mins |
 | 4 | `4_zero_grid.ipynb` | Builds the practice × month × drug grid, merges all sources, interpolates, applies floors, writes modelling datasets and exclusion-check `.tex` tables | ~15 mins |
-| 5 | `5_modelling.rmd` | Fits models with `glmmTMB`/`brms`, runs diagnostics and sensitivity analyses, writes Excel results | ~3 hours |
-| 6 | `6_tables_figures.ipynb` | Produces descriptive tables, GVIF table, choropleth maps and model/sensitivity tables | ~15 hours |
+| 5 | `5_modelling.rmd` | Fits models with `glmmTMB`/`brms`, runs diagnostics and sensitivity analyses, writes Excel results | ~15 hours |
+| 6 | `6_tables_figures.ipynb` | Produces descriptive tables, GVIF table, choropleth maps and model/sensitivity tables | ~15 minutes |
 
 ## Data sources
 
