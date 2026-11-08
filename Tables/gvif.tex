@@ -1,0 +1,26 @@
+\begin{table}[htbp]
+\centering
+\caption{Collinearity diagnostics: range of GVIF across datasets}
+\label{tab:gvif}
+\footnotesize
+\begin{tabular}{lccc}
+\toprule
+Predictor & df & Count stage (min--max) & Zero stage (min--max) \\
+\midrule
+IMD25 (per SD) & 1 & 1.02--1.03 & 1.06--1.07 \\
+Rural & 1 & 1.02--1.03 & 1.03--1.03 \\
+GP FTE (between practices) & 1 & 1.00--1.02 & 1.03--1.03 \\
+GP FTE (within practice) & 1 & 1.00--1.01 & 1.00--1.00 \\
+Time (linear) & 1 & 1.02--1.05 & 1.02--1.02 \\
+Time (quadratic) & 1 & 1.03--1.09 & 1.03--1.03 \\
+Working days & 1 & 1.36--1.41 & 1.38--1.38 \\
+Calendar month & 11 & 1.03--1.04 & 1.03--1.03 \\
+Log expected cases & 1 & -- & 1.07--1.08 \\
+\midrule
+\textbf{Largest} & & 1.41 & 1.38 \\
+\bottomrule
+\end{tabular}
+\par\vspace{4pt}
+{\footnotesize \textit{Notes:} Generalised variance inflation factors, reported as GVIF$^{1/(2\,\mathrm{df})}$ (the square root of the VIF for single-df terms; the calendar-month factor has 11 dummies). A value of 2.24 corresponds to a VIF of about 5. Calculated from the fixed-effect design matrix of each model, ignoring the random effects. The count stage uses practice-months with at least one item for hurdle models and all practice-months for models with fewer than 1\% zeros; the zero stage uses all practice-months and also includes log expected cases. Values for every dataset are in Table~\ref{tab:gvif_dataset}.\par}
+\end{table}
+

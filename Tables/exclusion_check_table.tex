@@ -1,0 +1,39 @@
+\begin{table}[htbp]
+\centering
+\caption{Characteristics of excluded and retained GP practices}
+\label{tab:exclusion_descriptives}
+\footnotesize
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{lccccc}
+\toprule
+ & Excluded ($n$ = 476) & Retained ($n$ = 6,163) & Std.\ diff. & $p$ & Missing (excluded) \\
+\midrule
+IMD25 (standardised) & 0.47 [-0.58, 1.05] & 0.13 [-0.80, 0.87] & 0.21 & $<$0.001 & 0\% \\
+Rural practice & 8.4\% & 15.3\% & -0.21 & $<$0.001 & 0\% \\
+GP FTE per 1,000 patients & 0.46 [0.32, 0.75] & 0.56 [0.40, 0.73] & 0.11 & 0.002 & 48\% \\
+List size (patients) & 3,086 [1,446, 6,146] & 8,751 [5,859, 12,592] & -0.90 & $<$0.001 & 34\% \\
+\bottomrule
+\end{tabular}
+\par\vspace{4pt}
+{\footnotesize \textit{Notes:} Median [IQR] for continuous variables. Std.\ diff.\ is the standardised mean difference (excluded minus retained). $p$ from Mann--Whitney (continuous) or $\chi^2$ (rural) tests. Covariates are taken from the raw practice data before cleaning.\par}
+\end{table}
+
+\begin{table}[htbp]
+\centering
+\caption{Adjusted odds of practice exclusion}
+\label{tab:exclusion_logit}
+\footnotesize
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{lcc}
+\toprule
+ & Model 1 ($n$ = 6,639) & Model 2 ($n$ = 6,410) \\
+\midrule
+IMD25 (per 1 SD) & 1.19 [1.08, 1.32]* & 1.13 [0.98, 1.32] \\
+Rural vs urban & 0.57 [0.41, 0.80]* & 0.48 [0.30, 0.77]* \\
+GP FTE per 1,000 (per 1 SD) & -- & 1.07 [0.99, 1.16] \\
+Log list size (per 1 SD) & -- & 0.28 [0.24, 0.32]* \\
+\bottomrule
+\end{tabular}
+\par\vspace{4pt}
+{\footnotesize \textit{Notes:} Odds ratios [95\% CI] from logistic regression of exclusion. Model 2 uses complete cases only. * $p\geq0.05$.\par}
+\end{table}

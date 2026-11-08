@@ -1,0 +1,30 @@
+\begin{table}[htbp]
+\centering
+\caption{Sensitivity analysis: IMD25 association with an AR(1) practice-level error structure, by drug class}
+\label{tab:sens_ar1}
+\footnotesize
+\renewcommand{\arraystretch}{1.0}
+\setlength{\tabcolsep}{4pt}
+\begin{adjustwidth}{-0cm}{-0cm}
+\begin{adjustbox}{max totalsize={\linewidth}{0.85\textheight}}
+\begin{tabular}{lcccc}
+\toprule
+ & \multicolumn{2}{c}{Volume (IRR)} & \multicolumn{2}{c}{AR(1) model} \\
+\cmidrule(lr){2-3}\cmidrule(lr){4-5}
+Substance / group & Primary & AR(1) & $\rho$ & $\Delta$AIC \\
+\midrule
+\hspace{0em}\raisebox{0.8ex}{AChEIs}\rule[-1.4ex]{0pt}{3.8ex} & \shortstack[c]{1.028\textsuperscript{***}\\{\scriptsize [1.013, 1.043]}} & \shortstack[c]{1.025\textsuperscript{**}\\{\scriptsize [1.010, 1.040]}} & 0.994 & $-$108,508 \\
+\hspace{0em}\raisebox{0.8ex}{NMDA receptor antagonists (memantine)}\rule[-1.4ex]{0pt}{3.8ex} & \shortstack[c]{1.059\textsuperscript{***}\\{\scriptsize [1.040, 1.078]}} & \shortstack[c]{1.051\textsuperscript{***}\\{\scriptsize [1.033, 1.070]}} & 0.993 & $-$114,475 \\
+\hspace{0em}\raisebox{0.8ex}{Anticholinergics}\rule[-1.4ex]{0pt}{3.8ex} & \shortstack[c]{1.504\textsuperscript{***}\\{\scriptsize [1.469, 1.540]}} & n/c & n/c & n/c \\
+\hspace{0em}\raisebox{0.8ex}{Dopamine precursors}\rule[-1.4ex]{0pt}{3.8ex} & \shortstack[c]{0.977\textsuperscript{***}\\{\scriptsize [0.965, 0.990]}} & \shortstack[c]{0.975\textsuperscript{***}\\{\scriptsize [0.962, 0.988]}} & 0.991 & $-$91,758 \\
+\hspace{0em}\raisebox{0.8ex}{Dopamine agonists}\rule[-1.4ex]{0pt}{3.8ex} & \shortstack[c]{1.092\textsuperscript{***}\\{\scriptsize [1.075, 1.110]}} & \shortstack[c]{1.093\textsuperscript{***}\\{\scriptsize [1.075, 1.111]}} & 0.996 & $-$53,762 \\
+\hspace{0em}\raisebox{0.8ex}{COMT inhibitors}\rule[-1.4ex]{0pt}{3.8ex} & \shortstack[c]{1.043\textsuperscript{**}\\{\scriptsize [1.011, 1.075]}} & n/c & n/c & n/c \\
+\hspace{0em}\raisebox{0.8ex}{MAO-B inhibitors}\rule[-1.4ex]{0pt}{3.8ex} & \shortstack[c]{0.971\textsuperscript{*}\\{\scriptsize [0.946, 0.996]}} & \shortstack[c]{0.970\textsuperscript{*}\\{\scriptsize [0.945, 0.995]}} & 0.993 & $-$31,489 \\
+\hspace{0em}\raisebox{0.8ex}{NMDA receptor antagonists (amantadine)}\rule[-1.4ex]{0pt}{3.8ex} & \shortstack[c]{1.053\textsuperscript{***}\\{\scriptsize [1.021, 1.086]}} & n/c & n/c & n/c \\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\end{adjustwidth}
+\par\vspace{4pt}
+{\footnotesize \textit{Notes:} Volume IRRs per 1 SD increase in IMD25 from the primary NB2 model and the model with an added practice-level AR(1) term (count part only, so the odds of any prescribing are unchanged). $\rho$ is the estimated AR(1) correlation; $\Delta$AIC is AR(1) minus primary (negative = better fit). n/c = did not converge. 95\% CIs in brackets. $^{*}p<0.05$, $^{**}p<0.01$, $^{***}p<0.001$.\par}
+\end{table}

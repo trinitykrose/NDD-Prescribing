@@ -1,0 +1,57 @@
+\begin{table}[htbp]
+\centering
+\caption{Sensitivity analysis: offset replaced by a freely estimated log expected-cases term}
+\label{tab:sens_offset}
+\footnotesize
+\renewcommand{\arraystretch}{1.0}
+\setlength{\tabcolsep}{4pt}
+\begin{adjustwidth}{-0cm}{-0cm}
+\begin{adjustbox}{max totalsize={\linewidth}{0.85\textheight}}
+\begin{tabular}{lcccc}
+\toprule
+ & \multicolumn{2}{c}{Volume (IRR), IMD25} & \multicolumn{2}{c}{Offset test} \\
+\cmidrule(lr){2-3}\cmidrule(lr){4-5}
+Substance / group & Offset (primary) & Free term & Elasticity & $\Delta$AIC \\
+\midrule
+\hspace{0em}\raisebox{0ex}{\textbf{Dementia}}\rule[-1.4ex]{0pt}{3.8ex} & -- & -- & -- & -- \\
+\hspace{1em}\raisebox{0.8ex}{\textbf{AChEIs}}\rule[-1.4ex]{0pt}{3.8ex} & \shortstack[c]{1.028\textsuperscript{***}\\{\scriptsize [1.013, 1.043]}} & \shortstack[c]{1.026\textsuperscript{***}\\{\scriptsize [1.011, 1.042]}} & \shortstack[c]{0.992\\{\scriptsize [0.980, 1.005]}} & 0.5 \\
+\hspace{2em}\raisebox{0.8ex}{Donepezil}\rule[-1.4ex]{0pt}{3.8ex} & \shortstack[c]{1.036\textsuperscript{***}\\{\scriptsize [1.020, 1.052]}} & \shortstack[c]{1.030\textsuperscript{***}\\{\scriptsize [1.014, 1.047]}} & \shortstack[c]{0.969\textsuperscript{***}\\{\scriptsize [0.956, 0.983]}} & $-$17.0 \\
+\hspace{2em}\raisebox{0.8ex}{Galantamine}\rule[-1.4ex]{0pt}{3.8ex} & \shortstack[c]{1.082\textsuperscript{***}\\{\scriptsize [1.036, 1.129]}} & \shortstack[c]{1.040\\{\scriptsize [0.997, 1.085]}} & \shortstack[c]{0.703\textsuperscript{***}\\{\scriptsize [0.653, 0.753]}} & $-$130.2 \\
+\hspace{2em}\raisebox{0.8ex}{Rivastigmine}\rule[-1.4ex]{0pt}{3.8ex} & \shortstack[c]{0.999\\{\scriptsize [0.978, 1.021]}} & \shortstack[c]{0.997\\{\scriptsize [0.975, 1.019]}} & \shortstack[c]{0.982\\{\scriptsize [0.959, 1.006]}} & $-$0.2 \\
+\hspace{1em}\raisebox{0.8ex}{\textbf{NMDA receptor antagonists (memantine)}}\rule[-1.4ex]{0pt}{3.8ex} & \shortstack[c]{1.059\textsuperscript{***}\\{\scriptsize [1.040, 1.078]}} & \shortstack[c]{1.064\textsuperscript{***}\\{\scriptsize [1.045, 1.083]}} & \shortstack[c]{1.026\textsuperscript{***}\\{\scriptsize [1.011, 1.041]}} & $-$9.9 \\
+\midrule
+\hspace{0em}\raisebox{0ex}{\textbf{Parkinson's disease}}\rule[-1.4ex]{0pt}{3.8ex} & -- & -- & -- & -- \\
+\hspace{1em}\raisebox{0.8ex}{\textbf{Anticholinergics}}\rule[-1.4ex]{0pt}{3.8ex} & \shortstack[c]{1.504\textsuperscript{***}\\{\scriptsize [1.469, 1.539]}} & \shortstack[c]{1.460\textsuperscript{***}\\{\scriptsize [1.426, 1.494]}} & \shortstack[c]{0.808\textsuperscript{***}\\{\scriptsize [0.789, 0.827]}} & $-$387.7 \\
+\hspace{2em}\raisebox{0ex}{Benzatropine}\rule[-1.4ex]{0pt}{3.8ex} & -- & -- & -- & -- \\
+\hspace{2em}\raisebox{0ex}{Biperiden}\rule[-1.4ex]{0pt}{3.8ex} & -- & -- & -- & -- \\
+\hspace{2em}\raisebox{0.8ex}{Trihexyphenidyl}\rule[-1.4ex]{0pt}{3.8ex} & \shortstack[c]{1.311\textsuperscript{***}\\{\scriptsize [1.264, 1.359]}} & \shortstack[c]{1.242\textsuperscript{***}\\{\scriptsize [1.198, 1.287]}} & \shortstack[c]{0.656\textsuperscript{***}\\{\scriptsize [0.614, 0.698]}} & $-$243.9 \\
+\hspace{2em}\raisebox{0.8ex}{Procyclidine}\rule[-1.4ex]{0pt}{3.8ex} & \shortstack[c]{1.541\textsuperscript{***}\\{\scriptsize [1.502, 1.581]}} & \shortstack[c]{1.492\textsuperscript{***}\\{\scriptsize [1.455, 1.530]}} & \shortstack[c]{0.797\textsuperscript{***}\\{\scriptsize [0.776, 0.817]}} & $-$368.4 \\
+\hspace{2em}\raisebox{0.8ex}{Orphenadrine}\rule[-1.4ex]{0pt}{3.8ex} & \shortstack[c]{1.300\textsuperscript{***}\\{\scriptsize [1.134, 1.491]}} & \shortstack[c]{1.101\\{\scriptsize [0.982, 1.235]}} & \shortstack[c]{-0.040\textsuperscript{***}\\{\scriptsize [-0.193, 0.113]}} & $-$145.2 \\
+\hspace{1em}\raisebox{0ex}{\textbf{Dopamine precursors}}\rule[-1.4ex]{0pt}{3.8ex} & -- & -- & -- & -- \\
+\hspace{2em}\raisebox{0.8ex}{Co-beneldopa}\rule[-1.4ex]{0pt}{3.8ex} & \shortstack[c]{0.979\textsuperscript{*}\\{\scriptsize [0.961, 0.997]}} & \shortstack[c]{0.982\\{\scriptsize [0.964, 1.001]}} & \shortstack[c]{1.025\textsuperscript{*}\\{\scriptsize [1.005, 1.045]}} & $-$4.0 \\
+\hspace{2em}\raisebox{0.8ex}{Co-careldopa}\rule[-1.4ex]{0pt}{3.8ex} & \shortstack[c]{0.968\textsuperscript{***}\\{\scriptsize [0.953, 0.984]}} & \shortstack[c]{0.969\textsuperscript{***}\\{\scriptsize [0.954, 0.985]}} & \shortstack[c]{1.009\\{\scriptsize [0.992, 1.025]}} & 1.0 \\
+\hspace{2em}\raisebox{0.8ex}{Levodopa/carbidopa/entacapone}\rule[-1.4ex]{0pt}{3.8ex} & \shortstack[c]{1.023\\{\scriptsize [0.987, 1.060]}} & \shortstack[c]{0.976\\{\scriptsize [0.942, 1.011]}} & \shortstack[c]{0.624\textsuperscript{***}\\{\scriptsize [0.579, 0.669]}} & $-$256.2 \\
+\hspace{2em}\raisebox{0ex}{Levodopa}\rule[-1.4ex]{0pt}{3.8ex} & -- & -- & -- & -- \\
+\hspace{2em}\raisebox{0ex}{Carbidopa}\rule[-1.4ex]{0pt}{3.8ex} & -- & -- & -- & -- \\
+\hspace{1em}\raisebox{0.8ex}{\textbf{Dopamine agonists}}\rule[-1.4ex]{0pt}{3.8ex} & \shortstack[c]{1.092\textsuperscript{***}\\{\scriptsize [1.075, 1.110]}} & \shortstack[c]{1.086\textsuperscript{***}\\{\scriptsize [1.068, 1.104]}} & \shortstack[c]{0.959\textsuperscript{***}\\{\scriptsize [0.945, 0.974]}} & $-$27.9 \\
+\hspace{2em}\raisebox{0.8ex}{Cabergoline}\rule[-1.4ex]{0pt}{3.8ex} & \shortstack[c]{1.228\textsuperscript{***}\\{\scriptsize [1.087, 1.387]}} & \shortstack[c]{1.123\textsuperscript{*}\\{\scriptsize [1.002, 1.259]}} & \shortstack[c]{0.317\textsuperscript{***}\\{\scriptsize [0.156, 0.478]}} & $-$60.6 \\
+\hspace{2em}\raisebox{0.8ex}{Apomorphine}\rule[-1.4ex]{0pt}{3.8ex} & \shortstack[c]{1.132\textsuperscript{***}\\{\scriptsize [1.063, 1.206]}} & \shortstack[c]{1.065\textsuperscript{*}\\{\scriptsize [1.008, 1.126]}} & \shortstack[c]{0.267\textsuperscript{***}\\{\scriptsize [0.179, 0.354]}} & $-$228.0 \\
+\hspace{2em}\raisebox{0.8ex}{Pramipexole}\rule[-1.4ex]{0pt}{3.8ex} & \shortstack[c]{1.129\textsuperscript{***}\\{\scriptsize [1.102, 1.157]}} & \shortstack[c]{1.112\textsuperscript{***}\\{\scriptsize [1.085, 1.139]}} & \shortstack[c]{0.890\textsuperscript{***}\\{\scriptsize [0.868, 0.913]}} & $-$90.1 \\
+\hspace{2em}\raisebox{0.8ex}{Ropinirole}\rule[-1.4ex]{0pt}{3.8ex} & \shortstack[c]{1.117\textsuperscript{***}\\{\scriptsize [1.093, 1.141]}} & \shortstack[c]{1.115\textsuperscript{***}\\{\scriptsize [1.091, 1.139]}} & \shortstack[c]{0.989\\{\scriptsize [0.967, 1.010]}} & 0.9 \\
+\hspace{2em}\raisebox{0.8ex}{Rotigotine}\rule[-1.4ex]{0pt}{3.8ex} & \shortstack[c]{1.013\\{\scriptsize [0.990, 1.037]}} & \shortstack[c]{0.994\\{\scriptsize [0.971, 1.017]}} & \shortstack[c]{0.837\textsuperscript{***}\\{\scriptsize [0.805, 0.868]}} & $-$100.9 \\
+\hspace{1em}\raisebox{0.8ex}{\textbf{COMT inhibitors}}\rule[-1.4ex]{0pt}{3.8ex} & \shortstack[c]{1.043\textsuperscript{**}\\{\scriptsize [1.011, 1.075]}} & \shortstack[c]{1.023\\{\scriptsize [0.993, 1.055]}} & \shortstack[c]{0.845\textsuperscript{***}\\{\scriptsize [0.803, 0.888]}} & $-$48.0 \\
+\hspace{2em}\raisebox{0.8ex}{Entacapone}\rule[-1.4ex]{0pt}{3.8ex} & \shortstack[c]{1.122\textsuperscript{***}\\{\scriptsize [1.075, 1.171]}} & \shortstack[c]{1.067\textsuperscript{**}\\{\scriptsize [1.023, 1.112]}} & \shortstack[c]{0.586\textsuperscript{***}\\{\scriptsize [0.524, 0.648]}} & $-$160.1 \\
+\hspace{2em}\raisebox{0.8ex}{Opicapone}\rule[-1.4ex]{0pt}{3.8ex} & \shortstack[c]{1.057\textsuperscript{**}\\{\scriptsize [1.018, 1.097]}} & \shortstack[c]{1.027\\{\scriptsize [0.990, 1.066]}} & \shortstack[c]{0.732\textsuperscript{***}\\{\scriptsize [0.679, 0.786]}} & $-$91.3 \\
+\hspace{2em}\raisebox{0ex}{Tolcapone}\rule[-1.4ex]{0pt}{3.8ex} & -- & -- & -- & -- \\
+\hspace{1em}\raisebox{0.8ex}{\textbf{MAO-B inhibitors}}\rule[-1.4ex]{0pt}{3.8ex} & \shortstack[c]{0.971\textsuperscript{*}\\{\scriptsize [0.946, 0.996]}} & \shortstack[c]{0.966\textsuperscript{**}\\{\scriptsize [0.942, 0.992]}} & \shortstack[c]{0.966\textsuperscript{*}\\{\scriptsize [0.935, 0.996]}} & $-$2.8 \\
+\hspace{2em}\raisebox{0.8ex}{Rasagiline}\rule[-1.4ex]{0pt}{3.8ex} & \shortstack[c]{0.970\textsuperscript{*}\\{\scriptsize [0.943, 0.997]}} & \shortstack[c]{0.960\textsuperscript{**}\\{\scriptsize [0.933, 0.987]}} & \shortstack[c]{0.916\textsuperscript{***}\\{\scriptsize [0.882, 0.951]}} & $-$20.6 \\
+\hspace{2em}\raisebox{0ex}{Safinamide}\rule[-1.4ex]{0pt}{3.8ex} & n/c & n/c & n/c & n/c \\
+\hspace{2em}\raisebox{0.8ex}{Selegiline}\rule[-1.4ex]{0pt}{3.8ex} & \shortstack[c]{1.118\textsuperscript{**}\\{\scriptsize [1.038, 1.203]}} & \shortstack[c]{1.041\\{\scriptsize [0.971, 1.115]}} & \shortstack[c]{0.362\textsuperscript{***}\\{\scriptsize [0.260, 0.463]}} & $-$134.4 \\
+\hspace{1em}\raisebox{0.8ex}{\textbf{NMDA receptor antagonists (amantadine)}}\rule[-1.4ex]{0pt}{3.8ex} & \shortstack[c]{1.053\textsuperscript{***}\\{\scriptsize [1.021, 1.086]}} & \shortstack[c]{1.032\textsuperscript{*}\\{\scriptsize [1.000, 1.064]}} & \shortstack[c]{0.830\textsuperscript{***}\\{\scriptsize [0.791, 0.869]}} & $-$70.8 \\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\end{adjustwidth}
+\par\vspace{4pt}
+{\footnotesize \textit{Notes:} Volume IRRs per 1 SD increase in IMD25 with expected cases as an offset (primary) and as a free covariate (fitted to positive months only). Elasticity is the coefficient on log expected cases (1 = proportional); its stars are from a likelihood-ratio test against 1. $\Delta$AIC is free term minus offset (negative = better fit). n/c = a fit did not converge. 95\% CIs in brackets. $^{*}p<0.05$, $^{**}p<0.01$, $^{***}p<0.001$.\par}
+\end{table}
