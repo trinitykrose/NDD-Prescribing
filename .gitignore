@@ -1,4 +1,6 @@
 .DS_Store
 .Rhistory
-Data/Raw/
+Data/Raw/ONS/
+Data/Raw/GP_REG/
+Data/Raw/gpwf/
 *.rds
