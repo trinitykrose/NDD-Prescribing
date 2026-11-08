@@ -1,0 +1,1418 @@
+# Preamble
+```{r packages, message=FALSE, warning=FALSE}
+library(arrow); library(DHARMa); library(dplyr); library(glmmTMB)
+library(lmtest); library(lubridate); library(parallel); library(performance)
+library(purrr); library(sandwich); library(tibble); library(timeDate)
+library(writexl); library(pbmcapply)
+library(brms); library(cmdstanr); library(posterior)
+library(glmmTMB); library(dplyr); library(tibble); library(writexl)
+```
+
+```{r Paths}
+BASE_DIR  <- ""
+FINAL_DIR <- file.path(BASE_DIR, "Data", "Final")
+
+LEVELS  <- c("disease", "drug_type", "individual")
+CTRL    <- glmmTMBControl(optCtrl = list(iter.max = 1000, eval.max = 1000))
+PRED    <- c("imd25_scaled","rural","gpfte_practice_mean","gpfte_within","t_c","t_c2","wd_c","month_f")
+pr      <- paste(PRED, collapse = " + ")
+```
+
+```{r helpers}
+# ---------- helpers ----------
+parse_ym <- function(x) as.Date(paste0(substr(gsub("-", "", as.character(x)), 1, 6), "01"), "%Y%m%d")
+wdays <- function(d) {
+  days <- seq(d, ceiling_date(d, "month") - 1, by = "day")
+  hol  <- as.Date(holidayLONDON(year = year(d)))
+  sum(!(wday(days, week_start = 1) %in% c(6, 7)) & !(days %in% hol))
+}
+prep <- function(level, name) {
+  df <- read_parquet(file.path(FINAL_DIR, level, paste0(name, "_2level.parquet")))
+  df$date <- parse_ym(df$YEAR_MONTH_DATE)
+  df$PRACTICE_CODE <- factor(df$PRACTICE_CODE); df$ICB_CODE <- factor(df$ICB_CODE)
+  df$log_expected_cases <- log(df$EXPECTED_CASES)
+  df$log_exp_c <- df$log_expected_cases - mean(df$log_expected_cases)      # centred only
+  mo <- df %>% distinct(month_index, date) %>% arrange(month_index) %>%
+    mutate(wd_c = map_dbl(date, wdays) - mean(map_dbl(date, wdays)),
+           t_c = as.numeric(scale(month_index)), t_c2 = t_c^2)
+  df <- left_join(df, select(mo, month_index, wd_c, t_c, t_c2), by = "month_index")
+  df$month_f <- factor(month(df$date))
+  df
+}
+coef_tbl <- function(m, part, label) {
+  s <- summary(m)$coefficients[[part]]
+  if (is.null(s)) return(NULL)
+  tibble(part = label, term = rownames(s), estimate = s[,1], se = s[,2], z = s[,3], p = s[,4],
+         exp_est = exp(s[,1]), exp_lo = exp(s[,1] - 1.96*s[,2]), exp_hi = exp(s[,1] + 1.96*s[,2]))
+}
+vc_tbl <- function(m, part, label, dist_var) {
+  vc <- VarCorr(m)[[part]]; if (is.null(vc)) return(NULL)
+  v <- vapply(vc, function(x) as.numeric(x[1, 1]), numeric(1))
+  v_icb <- if ("ICB_CODE" %in% names(v)) v[["ICB_CODE"]] else 0
+  v_pr  <- v[grepl("PRACTICE_CODE", names(v))][[1]]
+  tot <- v_icb + v_pr + dist_var
+  tibble(part = label, var_icb = v_icb, var_practice = v_pr,
+         VPC_icb = v_icb/tot, VPC_practice = v_pr/tot)
+}
+```
+
+```{r Primary NB2}
+
+N_CORES   <- 4
+LEVELS      <- c("individual", "disease", "drug_type")      # which levels
+DATASETS    <- NULL  # NULL = every dataset in LEVELS
+FORCE_REFIT <- FALSE  
+ZERO_CUTOFF <- 0 #for choosing models with low zero rates to run on NB
+MIN_POS <- 1000
+
+MODEL_DIR <- file.path(BASE_DIR, "Models", "Primary_NB2")
+MODEL_TAG <- "NB2"      # goes into the Excel file name, e.g. "NB2", "NB2_dementia_rerun"
+
+
+# ---------- one dataset ----------
+fit_one <- function(level, name) {
+  df <- prep(level, name)
+  npos <- sum(df$ITEMS > 0)
+  if (npos < MIN_POS) return(list(status = paste0("skipped: only ", npos, " positive rows")))
+  tier <- if (mean(df$ITEMS == 0) < ZERO_CUTOFF) "nb_only" else "hurdle"
+
+  # PRE-fit diagnostics
+  vif <- tryCatch(check_collinearity(lm(reformulate(PRED, "ITEMS"), df)), error = function(e) NULL)
+  pre <- tibble(level = level, name = name, tier = tier, N = nrow(df),
+                practices = nlevels(df$PRACTICE_CODE), icbs = nlevels(df$ICB_CODE),
+                months = n_distinct(df$month_index), n_zero = sum(df$ITEMS == 0),
+                prop_zero = mean(df$ITEMS == 0), mean_pos = mean(df$ITEMS[df$ITEMS > 0]),
+                var_pos = var(df$ITEMS[df$ITEMS > 0]), max_items = max(df$ITEMS),
+                max_vif = if (is.null(vif)) NA else max(vif$VIF),
+                gpfte_within_min = min(df$gpfte_within), gpfte_within_max = max(df$gpfte_within))
+
+  mk <- function(re) {
+    f_cnt <- as.formula(paste("ITEMS ~", pr, "+ offset(log_expected_cases) +", re))
+    f_zi  <- as.formula(paste("~", pr, "+ log_exp_c +", re))
+    if (tier == "hurdle") glmmTMB(f_cnt, ziformula = f_zi, family = truncated_nbinom2, data = df, control = CTRL)
+    else glmmTMB(f_cnt, family = nbinom2, data = df, control = CTRL)
+  }
+
+  t0 <- Sys.time(); re <- "(1 | ICB_CODE/PRACTICE_CODE)"
+  m <- tryCatch(mk(re), error = function(e) e)
+  if (inherits(m, "error")) return(list(status = paste0("MODEL ERROR: ", conditionMessage(m))))
+  mins <- as.numeric(difftime(Sys.time(), t0, units = "mins"))
+
+  dir.create(file.path(MODEL_DIR, level), recursive = TRUE, showWarnings = FALSE)
+  saveRDS(m, file.path(MODEL_DIR, level, paste0("model_", name, ".rds")))
+
+  # POST-fit diagnostics (no DHARMa simulation)
+  if (tier == "hurdle") {
+    p0 <- predict(m, type = "zprob"); zero_pred <- sum(p0)
+    rural_ratio <- sum(df$ITEMS[df$rural == 1] == 0) / sum(p0[df$rural == 1])
+    urban_ratio <- sum(df$ITEMS[df$rural == 0] == 0) / sum(p0[df$rural == 0])
+  } else { zero_pred <- NA; rural_ratio <- NA; urban_ratio <- NA }
+
+  # residual autocorrelation on Pearson residuals (cheap; replaces the DHARMa-based ACF)
+  df$resid <- as.numeric(residuals(m, type = "pearson"))
+  set.seed(1); samp <- sample(levels(df$PRACTICE_CODE), min(50, nlevels(df$PRACTICE_CODE)))
+  acf_mat <- t(sapply(samp, function(p) {
+    d <- df[df$PRACTICE_CODE == p, ]; r <- d$resid[order(d$month_index)]
+    if (length(r) > 10) acf(r, plot = FALSE, lag.max = 3)$acf[2:4] else rep(NA, 3)
+  }))
+  acf_m <- colMeans(acf_mat, na.rm = TRUE)
+
+  post <- tibble(level = level, name = name, tier = tier, random_effects = re,
+                 pdHess = isTRUE(m$sdr$pdHess), AIC = AIC(m), BIC = BIC(m), minutes = round(mins, 1),
+                 dispersion = NA_real_, disp_p = NA_real_, nb_theta = sigma(m),
+                 zero_obs = sum(df$ITEMS == 0), zero_pred = zero_pred,
+                 zero_ratio_rural = rural_ratio, zero_ratio_urban = urban_ratio,
+                 dharma_zero_ratio = NA_real_, dharma_zero_p = NA_real_,
+                 outlier_freq = NA_real_, outlier_p = NA_real_,
+                 acf_lag1 = acf_m[1], acf_lag2 = acf_m[2], acf_lag3 = acf_m[3],
+                 moran_I = NA_real_, moran_p = NA_real_)
+
+  mu <- mean(df$ITEMS[df$ITEMS > 0])
+  vpc <- bind_rows(vc_tbl(m, "cond", "Volume", log(1 + 1/mu + 1/sigma(m))),
+                   if (tier == "hurdle") vc_tbl(m, "zi", "Zero part (P(zero))", pi^2/3))
+  coefs <- bind_rows(coef_tbl(m, "cond", "Volume (IRR)"),
+                     if (tier == "hurdle") coef_tbl(m, "zi", "Zero part (OR for P(zero); invert for any prescribing)"))
+
+  list(status = "ok", pre = pre, post = post,
+       coefs = mutate(coefs, level = level, name = name, tier = tier, .before = 1),
+       vpc   = mutate(vpc,   level = level, name = name, tier = tier, .before = 1))
+}
+
+# ---------- build the job list from the settings ----------
+jobs <- do.call(rbind, lapply(LEVELS, function(lv) {
+  nm <- sub("_2level.parquet$", "", list.files(file.path(FINAL_DIR, lv), pattern = "_2level.parquet$"))
+  if (!is.null(DATASETS)) nm <- intersect(nm, DATASETS)
+  if (length(nm) == 0) return(NULL)
+  data.frame(lv = lv, nm = nm, stringsAsFactors = FALSE)
+}))
+stopifnot(!is.null(jobs), nrow(jobs) > 0)
+if (!is.null(DATASETS)) {
+  not_found <- setdiff(DATASETS, jobs$nm)
+  if (length(not_found) > 0) stop("Not found in LEVELS: ", paste(not_found, collapse = ", "))
+}
+cat("Running", nrow(jobs), "dataset(s); saving to:", MODEL_DIR, "| FORCE_REFIT =", FORCE_REFIT, "\n")
+
+run_job <- function(i) {
+  lv <- jobs$lv[i]; nm <- jobs$nm[i]
+  cache <- file.path(MODEL_DIR, lv, paste0("results_", nm, ".rds"))
+  if (!FORCE_REFIT && file.exists(cache)) return("cached")
+  r <- tryCatch(fit_one(lv, nm), error = function(e) list(status = paste0("FAILED: ", conditionMessage(e))))
+  if (identical(r$status, "ok")) {
+    dir.create(dirname(cache), recursive = TRUE, showWarnings = FALSE)
+    saveRDS(r, cache)
+  }
+  r$status
+}
+
+status <- mclapply(seq_len(nrow(jobs)), run_job, mc.cores = N_CORES, mc.preschedule = FALSE)
+jobs$status <- vapply(status, function(s) if (is.character(s)) s[1] else paste("worker error:", conditionMessage(s)), "")
+print(jobs, row.names = FALSE)
+
+# ---------- one Excel per level, from everything saved (not just this run) ----------
+for (lv in LEVELS) {
+  files <- list.files(file.path(MODEL_DIR, lv), pattern = "^results_.*\\.rds$", full.names = TRUE)
+  if (length(files) == 0) next
+  out <- setNames(lapply(files, readRDS), sub("^results_|\\.rds$", "", basename(files)))
+  write_xlsx(list(diagnostics_pre  = bind_rows(map(out, "pre")),
+                  diagnostics_post = bind_rows(map(out, "post")),
+                  coefficients     = bind_rows(map(out, "coefs")),
+                  variance_vpc     = bind_rows(map(out, "vpc"))),
+                  file.path(MODEL_DIR, lv, paste0(MODEL_TAG, "_", lv, "_results.xlsx")))
+}
+```
+
+```{r Primary NB1}
+N_CORES     <- 4
+MODEL_DIR <- file.path(BASE_DIR, "Models", "Primary_NB1")
+MODEL_TAG <- "NB1"
+
+LEVELS   <- c("disease", "drug_type", "individual")
+DATASETS <- NULL   # NULL = all datasets in the chosen levels
+
+FORCE_REFIT <- FALSE   # TRUE = ignore cached results and refit
+MIN_POS     <- 1000    # skip datasets with fewer positive rows
+# =============================================================
+
+CTRL <- glmmTMBControl(optCtrl = list(iter.max = 1000, eval.max = 1000))
+PRED <- c("imd25_scaled","rural","gpfte_practice_mean","gpfte_within","t_c","t_c2","wd_c","month_f")
+pr   <- paste(PRED, collapse = " + ")
+
+# ---------- helpers ----------
+parse_ym <- function(x) as.Date(paste0(substr(gsub("-", "", as.character(x)), 1, 6), "01"), "%Y%m%d")
+wdays <- function(d) {
+  days <- seq(d, ceiling_date(d, "month") - 1, by = "day")
+  hol  <- as.Date(holidayLONDON(year = year(d)))
+  sum(!(wday(days, week_start = 1) %in% c(6, 7)) & !(days %in% hol))
+}
+prep <- function(level, name) {
+  df <- read_parquet(file.path(FINAL_DIR, level, paste0(name, "_2level.parquet")))
+  df$date <- parse_ym(df$YEAR_MONTH_DATE)
+  df$PRACTICE_CODE <- factor(df$PRACTICE_CODE); df$ICB_CODE <- factor(df$ICB_CODE)
+  df$log_expected_cases <- log(df$EXPECTED_CASES)
+  df$log_exp_c <- df$log_expected_cases - mean(df$log_expected_cases)
+  mo <- df %>% distinct(month_index, date) %>% arrange(month_index) %>%
+    mutate(wd_c = map_dbl(date, wdays) - mean(map_dbl(date, wdays)),
+           t_c = as.numeric(scale(month_index)), t_c2 = t_c^2)
+  df <- left_join(df, select(mo, month_index, wd_c, t_c, t_c2), by = "month_index")
+  df$month_f <- factor(month(df$date))
+  df
+}
+coef_tbl <- function(m, part, label) {
+  s <- summary(m)$coefficients[[part]]
+  if (is.null(s)) return(NULL)
+  tibble(part = label, term = rownames(s), estimate = s[,1], se = s[,2], z = s[,3], p = s[,4],
+         exp_est = exp(s[,1]), exp_lo = exp(s[,1] - 1.96*s[,2]), exp_hi = exp(s[,1] + 1.96*s[,2]))
+}
+vc_tbl <- function(m, part, label, dist_var) {
+  vc <- VarCorr(m)[[part]]; if (is.null(vc)) return(NULL)
+  v <- vapply(vc, function(x) as.numeric(x[1, 1]), numeric(1))
+  v_icb <- if ("ICB_CODE" %in% names(v)) v[["ICB_CODE"]] else 0
+  v_pr  <- v[grepl("PRACTICE_CODE", names(v))][[1]]
+  tot <- v_icb + v_pr + dist_var
+  tibble(part = label, var_icb = v_icb, var_practice = v_pr,
+         VPC_icb = v_icb/tot, VPC_practice = v_pr/tot)
+}
+
+# ---------- one dataset (NB1) ----------
+fit_one <- function(level, name) {
+  df <- prep(level, name)
+  npos <- sum(df$ITEMS > 0)
+  if (npos < MIN_POS) return(list(status = paste0("skipped: only ", npos, " positive rows")))
+  tier <- if (mean(df$ITEMS == 0) < 0) "nb_only" else "hurdle"
+
+  vif <- tryCatch(check_collinearity(lm(reformulate(PRED, "ITEMS"), df)), error = function(e) NULL)
+  pre <- tibble(level = level, name = name, tier = tier, N = nrow(df),
+                practices = nlevels(df$PRACTICE_CODE), icbs = nlevels(df$ICB_CODE),
+                months = n_distinct(df$month_index), n_zero = sum(df$ITEMS == 0),
+                prop_zero = mean(df$ITEMS == 0), mean_pos = mean(df$ITEMS[df$ITEMS > 0]),
+                var_pos = var(df$ITEMS[df$ITEMS > 0]), max_items = max(df$ITEMS),
+                max_vif = if (is.null(vif)) NA else max(vif$VIF),
+                gpfte_within_min = min(df$gpfte_within), gpfte_within_max = max(df$gpfte_within))
+
+  mk <- function(re) {
+    f_cnt <- as.formula(paste("ITEMS ~", pr, "+ offset(log_expected_cases) +", re))
+    f_zi  <- as.formula(paste("~", pr, "+ log_exp_c +", re))
+    if (tier == "hurdle") glmmTMB(f_cnt, ziformula = f_zi, family = truncated_nbinom1, data = df, control = CTRL)
+    else glmmTMB(f_cnt, family = nbinom1, data = df, control = CTRL)
+  }
+
+  t0 <- Sys.time(); re <- "(1 | ICB_CODE/PRACTICE_CODE)"
+  m <- tryCatch(mk(re), error = function(e) e)
+  if (inherits(m, "error")) return(list(status = paste0("MODEL ERROR: ", conditionMessage(m))))
+  mins <- as.numeric(difftime(Sys.time(), t0, units = "mins"))
+
+  dir.create(file.path(MODEL_DIR, level), recursive = TRUE, showWarnings = FALSE)
+  saveRDS(m, file.path(MODEL_DIR, level, paste0("model_", name, ".rds")))
+
+  if (tier == "hurdle") {
+    p0 <- predict(m, type = "zprob"); zero_pred <- sum(p0)
+    rural_ratio <- sum(df$ITEMS[df$rural == 1] == 0) / sum(p0[df$rural == 1])
+    urban_ratio <- sum(df$ITEMS[df$rural == 0] == 0) / sum(p0[df$rural == 0])
+  } else { zero_pred <- NA; rural_ratio <- NA; urban_ratio <- NA }
+
+  if (tier == "hurdle") {
+    # hand-computed Pearson residuals for the hurdle NB1 (zero part x   zero-truncated NB1)
+    phi  <- sigma(m)
+    mu   <- predict(m, type = "conditional")            # untruncated NB1 mean
+    p0   <- dnbinom(0, mu = mu, size = mu / phi)
+    mt   <- mu / (1 - p0)                                # mean of truncated part
+    vt   <- (mu * (1 + phi) + mu^2) / (1 - p0) - mt^2    # variance of truncated part
+    pnz  <- 1 - predict(m, type = "zprob")               # P(Y > 0)
+    mean_y <- pnz * mt
+    var_y  <- pnz * (vt + mt^2) - mean_y^2
+    df$resid <- (df$ITEMS - mean_y) / sqrt(var_y)
+  } else {
+    df$resid <- as.numeric(residuals(m, type = "pearson"))
+  }
+  set.seed(1); samp <- sample(levels(df$PRACTICE_CODE), min(50, nlevels(df$PRACTICE_CODE)))
+  acf_mat <- t(sapply(samp, function(p) {
+    d <- df[df$PRACTICE_CODE == p, ]; r <- d$resid[order(d$month_index)]
+    if (length(r) > 10) acf(r, plot = FALSE, lag.max = 3)$acf[2:4] else rep(NA, 3)
+  }))
+  acf_m <- colMeans(acf_mat, na.rm = TRUE)
+
+  phi <- sigma(m)   # NB1: Var = mu * (1 + phi)
+  post <- tibble(level = level, name = name, tier = tier, family = "NB1", random_effects = re,
+                 pdHess = isTRUE(m$sdr$pdHess), AIC = AIC(m), BIC = BIC(m), minutes = round(mins, 1),
+                 nb1_phi = phi,
+                 zero_obs = sum(df$ITEMS == 0), zero_pred = zero_pred,
+                 zero_ratio_rural = rural_ratio, zero_ratio_urban = urban_ratio,
+                 acf_lag1 = acf_m[1], acf_lag2 = acf_m[2], acf_lag3 = acf_m[3])
+
+  mu <- mean(df$ITEMS[df$ITEMS > 0])
+  vpc <- bind_rows(vc_tbl(m, "cond", "Volume", log(1 + (1 + phi)/mu)),   # NB1 observation-level variance
+                   if (tier == "hurdle") vc_tbl(m, "zi", "Zero part (P(zero))", pi^2/3))
+  coefs <- bind_rows(coef_tbl(m, "cond", "Volume (IRR)"),
+                     if (tier == "hurdle") coef_tbl(m, "zi", "Zero part (OR for P(zero); invert for any prescribing)"))
+
+  list(status = "ok", pre = pre, post = post,
+       coefs = mutate(coefs, level = level, name = name, tier = tier, .before = 1),
+       vpc   = mutate(vpc,   level = level, name = name, tier = tier, .before = 1))
+}
+
+# ---------- build job list from settings ----------
+jobs <- do.call(rbind, lapply(LEVELS, function(lv) {
+  nm <- sub("_2level.parquet$", "", list.files(file.path(FINAL_DIR, lv), pattern = "_2level.parquet$"))
+  if (!is.null(DATASETS)) nm <- intersect(nm, DATASETS)
+  if (length(nm) == 0) return(NULL)
+  data.frame(lv = lv, nm = nm, stringsAsFactors = FALSE)
+}))
+stopifnot(!is.null(jobs), nrow(jobs) > 0)
+cat("Running", nrow(jobs), "dataset(s); saving to:", MODEL_DIR, "\n")
+
+run_job <- function(i) {
+  lv <- jobs$lv[i]; nm <- jobs$nm[i]
+  cache <- file.path(MODEL_DIR, lv, paste0("results_", nm, ".rds"))
+  if (!FORCE_REFIT && file.exists(cache)) return("cached")
+  r <- tryCatch(fit_one(lv, nm), error = function(e) list(status = paste0("FAILED: ", conditionMessage(e))))
+  if (identical(r$status, "ok")) {
+    dir.create(dirname(cache), recursive = TRUE, showWarnings = FALSE)
+    saveRDS(r, cache)
+  }
+  r$status
+}
+
+status <- mclapply(seq_len(nrow(jobs)), run_job, mc.cores = N_CORES, mc.preschedule = FALSE)
+jobs$status <- vapply(status, function(s) if (is.character(s)) s[1] else paste("worker error:", conditionMessage(s)), "")
+print(jobs, row.names = FALSE)
+
+# ---------- one Excel per level ----------
+for (lv in unique(jobs$lv)) {
+  out <- list()
+  for (nm in jobs$nm[jobs$lv == lv]) {
+    cache <- file.path(MODEL_DIR, lv, paste0("results_", nm, ".rds"))
+    if (file.exists(cache)) out[[nm]] <- readRDS(cache)
+  }
+  if (length(out) == 0) next
+  write_xlsx(list(diagnostics_pre  = bind_rows(map(out, "pre")),
+                  diagnostics_post = bind_rows(map(out, "post")),
+                  coefficients     = bind_rows(map(out, "coefs")),
+                  variance_vpc     = bind_rows(map(out, "vpc"))),
+             file.path(MODEL_DIR, lv, paste0(MODEL_TAG, "_", lv, "_results.xlsx")))
+}
+```
+
+```{r Primary Poisson}
+
+N_CORES     <- 4
+MODEL_DIR <- file.path(BASE_DIR, "Models", "Primary_Poisson")
+MODEL_TAG <- "Poisson"    
+
+LEVELS   <- c("individual")
+DATASETS <- c("Apomorphine")   # NULL = all datasets in the chosen levels
+
+FORCE_REFIT <- FALSE   # TRUE = ignore cached results and refit
+MIN_POS     <- 1000    # skip datasets with fewer positive rows
+# =============================================================
+
+CTRL <- glmmTMBControl(optCtrl = list(iter.max = 1000, eval.max = 1000))
+PRED <- c("imd25_scaled","rural","gpfte_practice_mean","gpfte_within","t_c","t_c2","wd_c","month_f")
+pr   <- paste(PRED, collapse = " + ")
+
+# ---------- helpers ----------
+parse_ym <- function(x) as.Date(paste0(substr(gsub("-", "", as.character(x)), 1, 6), "01"), "%Y%m%d")
+wdays <- function(d) {
+  days <- seq(d, ceiling_date(d, "month") - 1, by = "day")
+  hol  <- as.Date(holidayLONDON(year = year(d)))
+  sum(!(wday(days, week_start = 1) %in% c(6, 7)) & !(days %in% hol))
+}
+prep <- function(level, name) {
+  df <- read_parquet(file.path(FINAL_DIR, level, paste0(name, "_2level.parquet")))
+  df$date <- parse_ym(df$YEAR_MONTH_DATE)
+  df$PRACTICE_CODE <- factor(df$PRACTICE_CODE); df$ICB_CODE <- factor(df$ICB_CODE)
+  df$log_expected_cases <- log(df$EXPECTED_CASES)
+  df$log_exp_c <- df$log_expected_cases - mean(df$log_expected_cases)
+  mo <- df %>% distinct(month_index, date) %>% arrange(month_index) %>%
+    mutate(wd_c = map_dbl(date, wdays) - mean(map_dbl(date, wdays)),
+           t_c = as.numeric(scale(month_index)), t_c2 = t_c^2)
+  df <- left_join(df, select(mo, month_index, wd_c, t_c, t_c2), by = "month_index")
+  df$month_f <- factor(month(df$date))
+  df
+}
+coef_tbl <- function(m, part, label) {
+  s <- summary(m)$coefficients[[part]]
+  if (is.null(s)) return(NULL)
+  tibble(part = label, term = rownames(s), estimate = s[,1], se = s[,2], z = s[,3], p = s[,4],
+         exp_est = exp(s[,1]), exp_lo = exp(s[,1] - 1.96*s[,2]), exp_hi = exp(s[,1] + 1.96*s[,2]))
+}
+vc_tbl <- function(m, part, label, dist_var) {
+  vc <- VarCorr(m)[[part]]; if (is.null(vc)) return(NULL)
+  v <- vapply(vc, function(x) as.numeric(x[1, 1]), numeric(1))
+  v_icb <- if ("ICB_CODE" %in% names(v)) v[["ICB_CODE"]] else 0
+  v_pr  <- v[grepl("PRACTICE_CODE", names(v))][[1]]
+  tot <- v_icb + v_pr + dist_var
+  tibble(part = label, var_icb = v_icb, var_practice = v_pr,
+         VPC_icb = v_icb/tot, VPC_practice = v_pr/tot)
+}
+
+# ---------- one dataset (NB1) ----------
+fit_one <- function(level, name) {
+  df <- prep(level, name)
+  npos <- sum(df$ITEMS > 0)
+  if (npos < MIN_POS) return(list(status = paste0("skipped: only ", npos, " positive rows")))
+  tier <- if (mean(df$ITEMS == 0) < 0.01) "nb_only" else "hurdle"
+
+  vif <- tryCatch(check_collinearity(lm(reformulate(PRED, "ITEMS"), df)), error = function(e) NULL)
+  pre <- tibble(level = level, name = name, tier = tier, N = nrow(df),
+                practices = nlevels(df$PRACTICE_CODE), icbs = nlevels(df$ICB_CODE),
+                months = n_distinct(df$month_index), n_zero = sum(df$ITEMS == 0),
+                prop_zero = mean(df$ITEMS == 0), mean_pos = mean(df$ITEMS[df$ITEMS > 0]),
+                var_pos = var(df$ITEMS[df$ITEMS > 0]), max_items = max(df$ITEMS),
+                max_vif = if (is.null(vif)) NA else max(vif$VIF),
+                gpfte_within_min = min(df$gpfte_within), gpfte_within_max = max(df$gpfte_within))
+
+  mk <- function(re) {
+    f_cnt <- as.formula(paste("ITEMS ~", pr, "+ offset(log_expected_cases) +", re))
+    f_zi  <- as.formula(paste("~", pr, "+ log_exp_c +", re))
+    if (tier == "hurdle") glmmTMB(f_cnt, ziformula = f_zi, family = truncated_poisson, data = df, control = CTRL)
+    else glmmTMB(f_cnt, family = poisson, data = df, control = CTRL)
+  }
+
+  t0 <- Sys.time(); re <- "(1 | ICB_CODE/PRACTICE_CODE)"
+  m <- tryCatch(mk(re), error = function(e) e)
+  if (inherits(m, "error")) return(list(status = paste0("MODEL ERROR: ", conditionMessage(m))))
+  mins <- as.numeric(difftime(Sys.time(), t0, units = "mins"))
+
+  dir.create(file.path(MODEL_DIR, level), recursive = TRUE, showWarnings = FALSE)
+  saveRDS(m, file.path(MODEL_DIR, level, paste0("model_", name, ".rds")))
+
+  if (tier == "hurdle") {
+    p0 <- predict(m, type = "zprob"); zero_pred <- sum(p0)
+    rural_ratio <- sum(df$ITEMS[df$rural == 1] == 0) / sum(p0[df$rural == 1])
+    urban_ratio <- sum(df$ITEMS[df$rural == 0] == 0) / sum(p0[df$rural == 0])
+  } else { zero_pred <- NA; rural_ratio <- NA; urban_ratio <- NA }
+
+  if (tier == "hurdle") {
+    # hand-computed Pearson residuals for the hurdle Poisson (zero part x zero-truncated Poisson)
+    mu   <- predict(m, type = "conditional")             # untruncated Poisson mean
+    p0   <- exp(-mu)
+    mt   <- mu / (1 - p0)                                 # mean of the truncated part
+    vt   <- mt * (1 + mu - mt)                            # variance of the zero-truncated Poisson
+    pnz  <- 1 - predict(m, type = "zprob")                # P(Y > 0)
+    mean_y <- pnz * mt
+    var_y  <- pnz * (vt + mt^2) - mean_y^2
+    df$resid <- (df$ITEMS - mean_y) / sqrt(var_y)
+  } else {
+    df$resid <- as.numeric(residuals(m, type = "pearson"))
+  }
+  set.seed(1); samp <- sample(levels(df$PRACTICE_CODE), min(50, nlevels(df$PRACTICE_CODE)))
+  acf_mat <- t(sapply(samp, function(p) {
+    d <- df[df$PRACTICE_CODE == p, ]; r <- d$resid[order(d$month_index)]
+    if (length(r) > 10) acf(r, plot = FALSE, lag.max = 3)$acf[2:4] else rep(NA, 3)
+  }))
+  acf_m <- colMeans(acf_mat, na.rm = TRUE)
+
+  post <- tibble(level = level, name = name, tier = tier, family = "Poisson", random_effects = re,
+               pdHess = isTRUE(m$sdr$pdHess), AIC = AIC(m), BIC = BIC(m), minutes = round(mins, 1),
+               zero_obs = sum(df$ITEMS == 0), zero_pred = zero_pred,
+               zero_ratio_rural = rural_ratio, zero_ratio_urban = urban_ratio,
+               acf_lag1 = acf_m[1], acf_lag2 = acf_m[2], acf_lag3 = acf_m[3])
+
+  mu <- mean(df$ITEMS[df$ITEMS > 0])
+  vpc <- bind_rows(vc_tbl(m, "cond", "Volume", log(1 + 1/mu)),
+                 if (tier == "hurdle") vc_tbl(m, "zi", "Zero part (P(zero))", pi^2/3))
+  coefs <- bind_rows(coef_tbl(m, "cond", "Volume (IRR)"),
+                     if (tier == "hurdle") coef_tbl(m, "zi", "Zero part (OR for P(zero); invert for any prescribing)"))
+
+  list(status = "ok", pre = pre, post = post,
+       coefs = mutate(coefs, level = level, name = name, tier = tier, .before = 1),
+       vpc   = mutate(vpc,   level = level, name = name, tier = tier, .before = 1))
+}
+
+# ---------- build job list from settings ----------
+jobs <- do.call(rbind, lapply(LEVELS, function(lv) {
+  nm <- sub("_2level.parquet$", "", list.files(file.path(FINAL_DIR, lv), pattern = "_2level.parquet$"))
+  if (!is.null(DATASETS)) nm <- intersect(nm, DATASETS)
+  if (length(nm) == 0) return(NULL)
+  data.frame(lv = lv, nm = nm, stringsAsFactors = FALSE)
+}))
+stopifnot(!is.null(jobs), nrow(jobs) > 0)
+cat("Running", nrow(jobs), "dataset(s); saving to:", MODEL_DIR, "\n")
+
+run_job <- function(i) {
+  lv <- jobs$lv[i]; nm <- jobs$nm[i]
+  cache <- file.path(MODEL_DIR, lv, paste0("results_", nm, ".rds"))
+  if (!FORCE_REFIT && file.exists(cache)) return("cached")
+  r <- tryCatch(fit_one(lv, nm), error = function(e) list(status = paste0("FAILED: ", conditionMessage(e))))
+  if (identical(r$status, "ok")) {
+    dir.create(dirname(cache), recursive = TRUE, showWarnings = FALSE)
+    saveRDS(r, cache)
+  }
+  r$status
+}
+
+status <- mclapply(seq_len(nrow(jobs)), run_job, mc.cores = N_CORES, mc.preschedule = FALSE)
+jobs$status <- vapply(status, function(s) if (is.character(s)) s[1] else paste("worker error:", conditionMessage(s)), "")
+print(jobs, row.names = FALSE)
+
+# ---------- one Excel per level ----------
+for (lv in unique(jobs$lv)) {
+  out <- list()
+  for (nm in jobs$nm[jobs$lv == lv]) {
+    cache <- file.path(MODEL_DIR, lv, paste0("results_", nm, ".rds"))
+    if (file.exists(cache)) out[[nm]] <- readRDS(cache)
+  }
+  if (length(out) == 0) next
+  write_xlsx(list(diagnostics_pre  = bind_rows(map(out, "pre")),
+                  diagnostics_post = bind_rows(map(out, "post")),
+                  coefficients     = bind_rows(map(out, "coefs")),
+                  variance_vpc     = bind_rows(map(out, "vpc"))),
+             file.path(MODEL_DIR, lv, paste0(MODEL_TAG, "_", lv, "_results.xlsx")))
+}
+```
+
+# Dependence over time
+```{r AR(1) - runs on cached}
+
+MODEL_TAG <- "AR(1)"
+
+N_CORES     <- 2  
+MODEL_DIR <- file.path(BASE_DIR, "Models", "AR1_NB2")
+
+LEVELS   <- c("drug_type") 
+DATASETS <- NULL      # NULL = all, or e.g. c("MAOB_Inhibitors", "PD_NDMA_Receptor_Agonists")
+
+FAMILY      <- "NB2"  # "NB1" or "NB2"
+AR1_ZI      <- FALSE  # put AR(1) on the zero part (much slower)
+FORCE_REFIT <- FALSE
+MIN_POS     <- 1000
+# =============================================================
+
+CTRL <- glmmTMBControl(optCtrl = list(iter.max = 1000, eval.max = 1000))
+PRED <- c("imd25_scaled","rural","gpfte_practice_mean","gpfte_within","t_c","t_c2","wd_c","month_f")
+pr   <- paste(PRED, collapse = " + ")
+RE_BASE <- "(1 | ICB_CODE/PRACTICE_CODE)"
+RE_AR1  <- "ar1(time_f + 0 | PRACTICE_CODE)"
+
+parse_ym <- function(x) as.Date(paste0(substr(gsub("-", "", as.character(x)), 1, 6), "01"), "%Y%m%d")
+wdays <- function(d) {
+  days <- seq(d, ceiling_date(d, "month") - 1, by = "day")
+  hol  <- as.Date(holidayLONDON(year = year(d)))
+  sum(!(wday(days, week_start = 1) %in% c(6, 7)) & !(days %in% hol))
+}
+prep <- function(level, name) {
+  df <- read_parquet(file.path(FINAL_DIR, level, paste0(name, "_2level.parquet")))
+  df$date <- parse_ym(df$YEAR_MONTH_DATE)
+  df$PRACTICE_CODE <- factor(df$PRACTICE_CODE); df$ICB_CODE <- factor(df$ICB_CODE)
+  df$log_expected_cases <- log(df$EXPECTED_CASES)
+  df$log_exp_c <- df$log_expected_cases - mean(df$log_expected_cases)
+  mo <- df %>% distinct(month_index, date) %>% arrange(month_index) %>%
+    mutate(wd_c = map_dbl(date, wdays) - mean(map_dbl(date, wdays)),
+           t_c = as.numeric(scale(month_index)), t_c2 = t_c^2)
+  df <- left_join(df, select(mo, month_index, wd_c, t_c, t_c2), by = "month_index")
+  df$month_f <- factor(month(df$date))
+  df$time_f  <- factor(df$month_index)          # AR(1) time index (all months as levels)
+  df
+}
+coef_tbl <- function(m, part, label) {
+  s <- summary(m)$coefficients[[part]]
+  if (is.null(s)) return(NULL)
+  tibble(part = label, term = rownames(s), estimate = s[,1], se = s[,2], z = s[,3], p = s[,4],
+         exp_est = exp(s[,1]), exp_lo = exp(s[,1] - 1.96*s[,2]), exp_hi = exp(s[,1] + 1.96*s[,2]))
+}
+
+# variance components incl. the AR(1) term
+vc_ar1 <- function(m, part, label, dist_var) {
+  vc <- VarCorr(m)[[part]]; if (is.null(vc)) return(NULL)
+  multi <- vapply(vc, function(x) nrow(x) > 1, logical(1))
+  v_icb <- if ("ICB_CODE" %in% names(vc)) as.numeric(vc[["ICB_CODE"]][1, 1]) else 0
+  nest  <- names(vc)[grepl(":", names(vc)) & !multi]
+  v_pr  <- if (length(nest)) as.numeric(vc[[nest[1]]][1, 1]) else 0
+  if (any(multi)) {
+    x <- vc[[which(multi)[1]]]; v_ar <- as.numeric(x[1, 1]); rho <- attr(x, "correlation")[1, 2]
+  } else { v_ar <- 0; rho <- NA_real_ }
+  tot <- v_icb + v_pr + v_ar + dist_var
+  tibble(part = label, var_icb = v_icb, var_practice_intercept = v_pr, var_ar1 = v_ar, ar1_rho = rho,
+         VPC_icb = v_icb/tot, VPC_practice_intercept = v_pr/tot, VPC_ar1 = v_ar/tot)
+}
+
+fit_one <- function(level, name) {
+  df <- prep(level, name)
+  npos <- sum(df$ITEMS > 0)
+  if (npos < MIN_POS) return(list(status = paste0("skipped: only ", npos, " positive rows")))
+  tier <- if (mean(df$ITEMS == 0) < 0.01) "nb_only" else "hurdle"
+
+  re_cnt <- paste(RE_BASE, "+", RE_AR1)
+  re_zi  <- if (AR1_ZI) re_cnt else RE_BASE
+  f_cnt <- as.formula(paste("ITEMS ~", pr, "+ offset(log_expected_cases) +", re_cnt))
+  f_zi  <- as.formula(paste("~", pr, "+ log_exp_c +", re_zi))
+  fam_t <- if (FAMILY == "NB1") truncated_nbinom1 else truncated_nbinom2
+  fam_n <- if (FAMILY == "NB1") nbinom1 else nbinom2
+
+  t0 <- Sys.time()
+  m <- tryCatch(
+    if (tier == "hurdle") glmmTMB(f_cnt, ziformula = f_zi, family = fam_t, data = df, control = CTRL)
+    else glmmTMB(f_cnt, family = fam_n, data = df, control = CTRL),
+    error = function(e) e)
+  if (inherits(m, "error")) return(list(status = paste0("MODEL ERROR: ", conditionMessage(m))))
+  mins <- as.numeric(difftime(Sys.time(), t0, units = "mins"))
+
+  dir.create(file.path(MODEL_DIR, level), recursive = TRUE, showWarnings = FALSE)
+  saveRDS(m, file.path(MODEL_DIR, level, paste0("model_", name, ".rds")))
+
+  # zero calibration
+  if (tier == "hurdle") {
+    p0 <- predict(m, type = "zprob"); zero_pred <- sum(p0)
+    rural_ratio <- sum(df$ITEMS[df$rural == 1] == 0) / sum(p0[df$rural == 1])
+    urban_ratio <- sum(df$ITEMS[df$rural == 0] == 0) / sum(p0[df$rural == 0])
+  } else { zero_pred <- NA; rural_ratio <- NA; urban_ratio <- NA }
+
+  # Pearson residuals (hand-computed for truncated NB1, which glmmTMB can't do)
+  disp <- sigma(m)
+  if (tier == "hurdle" && FAMILY == "NB1") {
+    mu <- predict(m, type = "conditional"); p0n <- dnbinom(0, mu = mu, size = mu / disp)
+    mt <- mu / (1 - p0n); vt <- (mu * (1 + disp) + mu^2) / (1 - p0n) - mt^2
+    pnz <- 1 - predict(m, type = "zprob"); my <- pnz * mt; vy <- pnz * (vt + mt^2) - my^2
+    df$resid <- (df$ITEMS - my) / sqrt(vy)
+  } else df$resid <- as.numeric(residuals(m, type = "pearson"))
+
+  set.seed(1); samp <- sample(levels(df$PRACTICE_CODE), min(50, nlevels(df$PRACTICE_CODE)))
+  acf_m <- colMeans(t(sapply(samp, function(p) {
+    d <- df[df$PRACTICE_CODE == p, ]; r <- d$resid[order(d$month_index)]
+    if (length(r) > 10) acf(r, plot = FALSE, lag.max = 3)$acf[2:4] else rep(NA, 3)
+  })), na.rm = TRUE)
+
+  post <- tibble(level = level, name = name, tier = tier, family = FAMILY, ar1_zi = AR1_ZI,
+                 pdHess = isTRUE(m$sdr$pdHess), AIC = AIC(m), BIC = BIC(m), minutes = round(mins, 1),
+                 dispersion_par = disp, zero_obs = sum(df$ITEMS == 0), zero_pred = zero_pred,
+                 zero_ratio_rural = rural_ratio, zero_ratio_urban = urban_ratio,
+                 acf_lag1 = acf_m[1], acf_lag2 = acf_m[2], acf_lag3 = acf_m[3])
+
+  mu_pos <- mean(df$ITEMS[df$ITEMS > 0])
+  obs_var <- if (FAMILY == "NB1") log(1 + (1 + disp)/mu_pos) else log(1 + 1/mu_pos + 1/disp)
+  vpc <- bind_rows(vc_ar1(m, "cond", "Volume", obs_var),
+                   if (tier == "hurdle") vc_ar1(m, "zi", "Zero part (P(zero))", pi^2/3))
+  coefs <- bind_rows(coef_tbl(m, "cond", "Volume (IRR)"),
+                     if (tier == "hurdle") coef_tbl(m, "zi", "Zero part (OR for P(zero); invert for any prescribing)"))
+
+  list(status = "ok", post = post,
+       coefs = mutate(coefs, level = level, name = name, tier = tier, .before = 1),
+       vpc   = mutate(vpc,   level = level, name = name, tier = tier, .before = 1))
+}
+
+jobs <- do.call(rbind, lapply(LEVELS, function(lv) {
+  nm <- sub("_2level.parquet$", "", list.files(file.path(FINAL_DIR, lv), pattern = "_2level.parquet$"))
+  if (!is.null(DATASETS)) nm <- intersect(nm, DATASETS)
+  if (length(nm) == 0) return(NULL)
+  data.frame(lv = lv, nm = nm, stringsAsFactors = FALSE)
+}))
+stopifnot(!is.null(jobs), nrow(jobs) > 0)
+cat("Running", nrow(jobs), "dataset(s) |", FAMILY, "+ AR(1) | saving to:", MODEL_DIR, "\n")
+
+run_job <- function(i) {
+  lv <- jobs$lv[i]; nm <- jobs$nm[i]
+  cache <- file.path(MODEL_DIR, lv, paste0("results_", nm, ".rds"))
+  if (!FORCE_REFIT && file.exists(cache)) return("cached")
+  r <- tryCatch(fit_one(lv, nm), error = function(e) list(status = paste0("FAILED: ", conditionMessage(e))))
+  if (identical(r$status, "ok")) { dir.create(dirname(cache), recursive = TRUE, showWarnings = FALSE); saveRDS(r, cache) }
+  r$status
+}
+status <- mclapply(seq_len(nrow(jobs)), run_job, mc.cores = N_CORES, mc.preschedule = FALSE)
+jobs$status <- vapply(status, function(s) if (is.character(s)) s[1] else paste("worker error:", conditionMessage(s)), "")
+print(jobs, row.names = FALSE)
+
+for (lv in unique(jobs$lv)) {
+  out <- list()
+  for (nm in jobs$nm[jobs$lv == lv]) {
+    cache <- file.path(MODEL_DIR, lv, paste0("results_", nm, ".rds"))
+    if (file.exists(cache)) out[[nm]] <- readRDS(cache)
+  }
+  if (length(out) == 0) next
+  write_xlsx(list(diagnostics_post = bind_rows(map(out, "post")),
+                  coefficients     = bind_rows(map(out, "coefs")),
+                  variance_vpc     = bind_rows(map(out, "vpc"))),
+             file.path(MODEL_DIR, lv, paste0(MODEL_TAG, "_", lv, "_results.xlsx")))
+}
+```
+
+# RE Normality
+```{r RE Normaility check}
+MODEL_DIR <- file.path(BASE_DIR, "Models")                     
+OUT_DIR   <- file.path(BASE_DIR, "Models", "RE_Normality")  
+ONLY      <- ""   # "" = all models; or text matched against the full path, e.g. "Primary_NB2", "Anticholinergic", "drug_type"
+SD_MIN    <- 0.01 # random effects with sd below this are flagged as collapsed (shape statistics not interpretable)
+
+# ==========================================================================
+dir.create(file.path(OUT_DIR, "plots"), showWarnings = FALSE, recursive = TRUE)
+
+skew <- function(x) { x <- x - mean(x); mean(x^3) / mean(x^2)^1.5 }
+kurt <- function(x) { x <- x - mean(x); mean(x^4) / mean(x^2)^2 - 3 }
+
+files <- list.files(MODEL_DIR, pattern = "^model_.*\\.rds$", recursive = TRUE, full.names = TRUE)
+if (nzchar(ONLY)) files <- files[grepl(ONLY, files)]
+cat("Models found:", length(files), "\n")
+
+root <- normalizePath(MODEL_DIR)
+rows <- list()
+
+for (f in files) {
+  nm    <- sub("^model_", "", sub("\\.rds$", "", basename(f)))
+  rel   <- sub(paste0("^", root, "/?"), "", normalizePath(f))
+  parts <- strsplit(rel, "/")[[1]]
+  lvl   <- parts[length(parts) - 1]                                   # disease / drug_type / individual
+  mset  <- if (length(parts) > 2) paste(parts[1:(length(parts) - 2)], collapse = "/") else "(root)"   # e.g. Primary_NB1
+  mid   <- paste(mset, lvl, nm, sep = "/")                            # e.g. Primary_NB1/drug_type/AChEI
+  cat("Checking", mid, "\n")
+  m <- tryCatch(readRDS(f), error = function(e) NULL)
+  if (is.null(m)) next
+  re <- tryCatch(ranef(m), error = function(e) NULL)
+  rm(m); gc(verbose = FALSE)
+  if (is.null(re)) next
+
+  items <- list()
+  for (comp in c("cond", "zi")) {
+    r <- re[[comp]]
+    if (is.null(r) || length(r) == 0) next
+    for (g in names(r)) {
+      d <- r[[g]]
+      col <- if ("(Intercept)" %in% names(d)) "(Intercept)" else names(d)[1]
+      x <- as.numeric(d[[col]]); x <- x[is.finite(x)]
+      grp <- if (grepl("PRACTICE", g)) "practice" else "icb"
+      items[[length(items) + 1]] <- list(comp = ifelse(comp == "cond", "count", "zero"), grp = grp, x = x)
+    }
+  }
+  if (length(items) == 0) next
+
+  png(file.path(OUT_DIR, "plots", paste0("qq_", gsub("/", "_", mid), ".png")),
+      width = 450 * length(items), height = 450, res = 100)
+  par(mfrow = c(1, length(items)), mar = c(4, 4, 3, 1))
+  for (it in items) {
+    x <- it$x
+    s <- sd(x)
+    sw <- if (length(x) >= 3 && length(x) <= 5000) shapiro.test(x)$p.value else NA_real_
+    rows[[length(rows) + 1]] <- tibble(
+      model_id = mid, model_set = mset, level = lvl, model = nm,
+      part = it$comp, group = it$grp, n = length(x),
+      sd = s, collapsed = s < SD_MIN,
+      skew = skew(x), excess_kurtosis = kurt(x),
+      pct_beyond_3sd = mean(abs(x - mean(x)) > 3 * s) * 100,
+      max_abs_z = max(abs(x - mean(x))) / s, shapiro_p = sw)
+    qqnorm(x, main = paste(mset, nm, "-", it$comp, it$grp), pch = 16, cex = 0.4)
+    qqline(x, col = "red")
+  }
+  dev.off()
+}
+
+res <- bind_rows(rows)
+
+# ---- Excel output (replaces write.csv) ----
+settings <- tibble(
+  setting = c("MODEL_DIR", "ONLY", "SD_MIN", "models_checked", "run_date"),
+  value   = c(MODEL_DIR, ONLY, as.character(SD_MIN), as.character(length(files)), as.character(Sys.Date()))
+)
+xlsx_path <- file.path(OUT_DIR, "re_normality_summary.xlsx")
+write_xlsx(list(summary = res, settings = settings), path = xlsx_path)
+
+options(width = 220, tibble.width = Inf)
+print(res %>% mutate(across(where(is.numeric), ~ round(.x, 3))), n = Inf)
+cat("\nModel sets found:\n"); print(table(res$model_set))
+cat("\nExcel summary saved to:", xlsx_path, "\n")
+cat("Plots saved in:", file.path(OUT_DIR, "plots"), "\n")
+```
+
+# RE Correlation with covariates
+````{r Correlation with covariates}
+
+MODEL_DIR <- file.path(BASE_DIR, "Models", "Primary_NB2")
+OUT_DIR   <- file.path(BASE_DIR, "Models", "RE_Covariate_Correlation")
+ONLY      <- ""     # "" = all models; or text to match, e.g. "drug_type" or "Anticholinergic"
+COVS      <- c("imd25_scaled", "rural", "gpfte_practice_mean")   # practice-level covariates to check
+
+# ==========================================================================
+dir.create(OUT_DIR, showWarnings = FALSE, recursive = TRUE)
+files <- list.files(MODEL_DIR, pattern = "^model_.*\\.rds$", recursive = TRUE, full.names = TRUE)
+if (nzchar(ONLY)) files <- files[grepl(ONLY, files)]
+cat("Models found:", length(files), "\n")
+
+practice_re <- function(r, lev) {                     # named vector of practice random intercepts
+  if (is.null(r) || length(r) == 0) return(NULL)
+  g <- names(r)[grepl("PRACTICE", names(r))][1]
+  if (is.na(g)) return(NULL)
+  d <- r[[g]]; v <- d[["(Intercept)"]]
+  pc <- vapply(strsplit(rownames(d), ":", fixed = TRUE),
+               function(p) { h <- p[p %in% lev]; if (length(h)) h[1] else p[1] }, "")
+  setNames(v, pc)
+}
+
+rows <- list()
+for (f in files) {
+  nm <- sub("^model_", "", sub("\\.rds$", "", basename(f))); lvl <- basename(dirname(f))
+  cat("Checking", lvl, nm, "\n")
+  m <- tryCatch(readRDS(f), error = function(e) NULL)
+  if (is.null(m)) next
+  fr <- m$frame
+  re <- tryCatch(ranef(m), error = function(e) NULL)
+  rm(m); gc(verbose = FALSE)
+  if (is.null(re)) next
+  lev <- unique(as.character(fr$PRACTICE_CODE))
+  prac <- fr %>% mutate(PRACTICE_CODE = as.character(PRACTICE_CODE)) %>%
+    group_by(PRACTICE_CODE) %>%
+    summarise(across(any_of(COVS), ~ mean(as.numeric(.x), na.rm = TRUE)), .groups = "drop")
+
+  for (comp in c("cond", "zi")) {
+    x <- practice_re(re[[comp]], lev)
+    if (is.null(x)) next
+    dd <- inner_join(tibble(PRACTICE_CODE = names(x), re = as.numeric(x)), prac, by = "PRACTICE_CODE")
+    for (cv in intersect(COVS, names(dd))) {
+      ok <- is.finite(dd$re) & is.finite(dd[[cv]])
+      good <- sum(ok) > 5 && sd(dd$re[ok]) > 1e-6 && sd(dd[[cv]][ok]) > 1e-6
+      rows[[length(rows) + 1]] <- tibble(
+        level = lvl, model = nm, part = ifelse(comp == "cond", "count", "zero"),
+        covariate = cv, n = sum(ok),
+        pearson  = if (good) cor(dd$re[ok], dd[[cv]][ok]) else NA_real_,
+        spearman = if (good) cor(dd$re[ok], dd[[cv]][ok], method = "spearman") else NA_real_)
+    }
+  }
+}
+
+res <- bind_rows(rows)
+write_xlsx(list(correlations = res), file.path(OUT_DIR, "re_covariate_correlation.xlsx"))
+options(width = 200, tibble.width = Inf)
+print(res %>% mutate(across(where(is.numeric), ~ round(.x, 3))), n = Inf)
+````
+
+# Cross stage correlation check
+```{r Cross stage correlation check}
+MODEL_DIR <- file.path(BASE_DIR, "Models")                    
+OUT_DIR   <- file.path(BASE_DIR, "Models", "RE_Stage_Correlation")
+ONLY      <- ""   # "" = all models; or text matched against the full path, e.g. "Primary_NB2", "drug_type", "Anticholinergic"
+SKIP      <- ""   # folders to ignore 
+
+# ==========================================================================
+dir.create(file.path(OUT_DIR, "plots"), showWarnings = FALSE, recursive = TRUE)
+
+files <- list.files(MODEL_DIR, pattern = "^model_.*\\.rds$", recursive = TRUE, full.names = TRUE)
+if (nzchar(SKIP)) files <- files[!grepl(SKIP, files)]
+if (nzchar(ONLY)) files <- files[grepl(ONLY, files)]
+cat("Models found:", length(files), "\n")
+
+root <- normalizePath(MODEL_DIR)
+
+pair <- function(rc, rz, grp) {
+  a <- rc[[grep(grp, names(rc))[1]]]; b <- rz[[grep(grp, names(rz))[1]]]
+  x <- a[["(Intercept)"]]; names(x) <- rownames(a)
+  y <- b[["(Intercept)"]]; names(y) <- rownames(b)
+  k <- intersect(names(x), names(y))
+  list(x = x[k], y = y[k])
+}
+
+rows <- list()
+for (f in files) {
+  nm    <- sub("^model_", "", sub("\\.rds$", "", basename(f)))
+  rel   <- sub(paste0("^", root, "/?"), "", normalizePath(f))
+  parts <- strsplit(rel, "/")[[1]]
+  lvl   <- parts[length(parts) - 1]
+  mset  <- if (length(parts) > 2) paste(parts[1:(length(parts) - 2)], collapse = "/") else "(root)"
+  mid   <- paste(mset, lvl, nm, sep = "/")
+  cat("Checking", mid, "\n")
+  m <- tryCatch(readRDS(f), error = function(e) NULL)
+  if (is.null(m)) next
+  re <- tryCatch(ranef(m), error = function(e) NULL)
+  rm(m); gc(verbose = FALSE)
+  if (is.null(re) || is.null(re$zi) || length(re$zi) == 0) { cat("  ", mid, ": no zero part, skipped\n"); next }
+
+  png(file.path(OUT_DIR, "plots", paste0("corr_", gsub("/", "_", mid), ".png")), width = 900, height = 450, res = 100)
+  par(mfrow = c(1, 2), mar = c(4, 4, 3, 1))
+  for (g in c("PRACTICE", "^ICB_CODE$")) {
+    p <- tryCatch(pair(re$cond, re$zi, g), error = function(e) NULL)
+    if (is.null(p) || length(p$x) < 5) next
+    lab <- ifelse(g == "PRACTICE", "practice", "icb")
+    ok <- is.finite(p$x) & is.finite(p$y)
+    good <- sum(ok) > 5 && sd(p$x[ok]) > 1e-6 && sd(p$y[ok]) > 1e-6
+    r  <- if (good) cor(p$x[ok], p$y[ok]) else NA_real_
+    rs <- if (good) cor(p$x[ok], p$y[ok], method = "spearman") else NA_real_
+    rows[[length(rows) + 1]] <- tibble(model_id = mid, model_set = mset, level = lvl, model = nm,
+                                      group = lab, n = length(p$x), pearson = r, spearman = rs)
+    plot(p$x, p$y, pch = 16, cex = ifelse(lab == "practice", 0.3, 0.8),
+         xlab = "count-part intercept", ylab = "zero-part intercept (log-odds of zero)",
+         main = paste(mset, nm, "-", lab, "r =", round(r, 2)), cex.main = 0.8)
+    abline(h = 0, v = 0, lty = 3)
+  }
+  dev.off()
+}
+
+res <- bind_rows(rows)
+xlsx_path <- file.path(OUT_DIR, "re_stage_correlation.xlsx")
+write_xlsx(list(correlations = res), path = xlsx_path)
+cat("Excel summary saved to:", xlsx_path, "\n")
+
+options(width = 200, tibble.width = Inf)
+print(res %>% mutate(across(where(is.numeric), ~ round(.x, 3))), n = Inf)
+cat("\nModel sets found:\n"); print(table(res$model_set))
+cat("\nPlots saved in:", file.path(OUT_DIR, "plots"), "\n")
+```
+
+# BRMS
+```{r}
+MODEL_DIR <- file.path(BASE_DIR, "Models", "Primary_NB2")
+OUT_DIR   <- file.path(BASE_DIR, "Models", "Correlated_RE_brms")
+
+LV        <- "drug_type"
+NAMES <- NULL        # NULL = every model in LV; or e.g. "PD_NDMA_Receptor_Agonists" to run just one
+
+if (is.null(NAMES)) NAMES <- list.files(file.path(MODEL_DIR, LV), pattern = "^model_.*\\.rds$")
+NAMES <- sub("\\.rds$", "", sub("^model_", "", NAMES))
+cat("Models to run:", paste(NAMES, collapse = ", "), "\n")
+
+N_PRAC   <- 300
+MIN_POS  <- 500          # skip if fewer non-zero months than this
+MIN_ZERO <- 0            # skip only if the sample has no zeros at all
+SEED     <- 1
+CHAINS   <- 2; CORES <- min(CHAINS, parallel::detectCores() - 1)
+ITER     <- 3000; ADAPT <- 0.95
+RHAT_MAX <- 1.01; ESS_MIN <- 400       # convergence thresholds used for the `converged` column
+FORCE_REFIT <- FALSE                   # TRUE = ignore saved results and refit everything
+# =============================================================
+
+dir.create(OUT_DIR, recursive = TRUE, showWarnings = FALSE)
+BACKEND <- "cmdstanr"
+
+covs <- "imd25_scaled + rural + gpfte_practice_mean + gpfte_within + t_c + t_c2 + wd_c + month_f + log_exp_c"
+f_corr <- bf(as.formula(paste("ITEMS ~", covs, "+ (1 |p| PRACTICE_CODE)")),
+             as.formula(paste("hu ~",    covs, "+ (1 |p| PRACTICE_CODE)")))
+pri <- c(set_prior("normal(0, 2)", class = "b"),
+         set_prior("student_t(3, 0, 2.5)", class = "Intercept"),
+         set_prior("student_t(3, 0, 2.5)", class = "sd"),
+         set_prior("lkj(2)", class = "cor"))
+
+get_data <- function(nm) {
+  m  <- readRDS(file.path(MODEL_DIR, LV, paste0("model_", nm, ".rds")))
+  fr <- m$frame
+  for (oc in grep("^offset\\(", names(fr), value = TRUE))
+    names(fr)[names(fr) == oc] <- sub("^offset\\((.*)\\)$", "\\1", oc)
+  rm(m); gc(verbose = FALSE)
+  set.seed(SEED)
+  pr <- unique(as.character(fr$PRACTICE_CODE))
+  d  <- fr[as.character(fr$PRACTICE_CODE) %in% sample(pr, min(N_PRAC, length(pr))), ]
+  d$PRACTICE_CODE <- factor(as.character(d$PRACTICE_CODE)); d <- droplevels(d)
+  for (v in names(d)) if (is.matrix(d[[v]])) d[[v]] <- as.numeric(d[[v]])
+  d$ITEMS <- as.integer(round(d$ITEMS))
+  for (v in intersect(c("t_c","t_c2","wd_c","log_expected_cases","log_exp_c",
+                        "gpfte_practice_mean","gpfte_within"), names(d)))
+    d[[v]] <- as.numeric(scale(d[[v]]))
+  d
+}
+
+q <- function(x) c(est = mean(x), lo = quantile(x, .025, names = FALSE), hi = quantile(x, .975, names = FALSE))
+template <- NULL
+
+# ---- correlated random intercepts (brms) ----
+run_brms <- function(nm, d, zf) {
+  t0 <- Sys.time()
+  fpath <- file.path(OUT_DIR, paste0("brms_", nm, "_correlated_v2"))
+  fit <- NULL
+  if (!is.null(template))               # reuse compiled model: sampling only
+    fit <- tryCatch(update(template, newdata = d, recompile = FALSE,
+                           chains = CHAINS, cores = CORES, iter = ITER, warmup = ITER/2,
+                           control = list(adapt_delta = ADAPT), seed = SEED,
+                           file = fpath, file_refit = "always", save_cmdstan_config = TRUE),
+                    error = function(e) { cat("reuse failed, recompiling\n"); NULL })
+  if (is.null(fit))
+    fit <- brm(f_corr, data = d, family = hurdle_negbinomial(), prior = pri,
+               chains = CHAINS, cores = CORES, iter = ITER, warmup = ITER/2,
+               seed = SEED, backend = BACKEND, control = list(adapt_delta = ADAPT),
+               file = fpath, file_refit = "always", save_cmdstan_config = TRUE)
+  if (is.null(template)) template <<- fit
+  mins <- round(as.numeric(difftime(Sys.time(), t0, units = "mins")), 1)
+
+  dr  <- as_draws_df(fit)
+  cn  <- grep("^cor_", variables(dr), value = TRUE)[1]
+  key <- c("b_imd25_scaled", "b_hu_imd25_scaled", cn)
+  sm  <- summarise_draws(subset_draws(dr, variable = key), "rhat", "ess_bulk")
+  mu <- q(dr$b_imd25_scaled); hu <- q(dr[["b_hu_imd25_scaled"]]); rho <- q(dr[[cn]])
+  np <- nuts_params(fit)
+  tibble(level = LV, name = nm, n_practices = nlevels(d$PRACTICE_CODE), n_rows = nrow(d),
+         pct_zero = round(100 * zf, 2),
+         IRR = exp(mu[1]), IRR_lo = exp(mu[2]), IRR_hi = exp(mu[3]),
+         OR_any = exp(-hu[1]), OR_lo = exp(-hu[3]), OR_hi = exp(-hu[2]),
+         rho = rho[1], rho_lo = rho[2], rho_hi = rho[3],
+         rhat_IRR = sm$rhat[1], rhat_OR = sm$rhat[2], rhat_rho = sm$rhat[3],
+         ess_IRR = sm$ess_bulk[1], ess_OR = sm$ess_bulk[2], ess_rho = sm$ess_bulk[3],
+         divergences = sum(np$Value[np$Parameter == "divergent__"]), minutes = mins)
+}
+
+# ---- independent random intercepts (glmmTMB baseline, same data) ----
+run_glmm <- function(nm, d) {
+  fit <- tryCatch(glmmTMB(as.formula(paste("ITEMS ~", covs, "+ (1 | PRACTICE_CODE)")),
+                          ziformula = as.formula(paste("~", covs, "+ (1 | PRACTICE_CODE)")),
+                          family = truncated_nbinom2, data = d), error = function(e) NULL)
+  if (is.null(fit))
+    return(tibble(name = nm, IRR_ind = NA_real_, IRR_ind_lo = NA_real_, IRR_ind_hi = NA_real_,
+                  OR_ind = NA_real_, OR_ind_lo = NA_real_, OR_ind_hi = NA_real_, pdHess_ind = NA))
+  s <- summary(fit)$coefficients; cd <- s$cond["imd25_scaled", ]; zi <- s$zi["imd25_scaled", ]
+  tibble(name = nm,
+         IRR_ind = exp(cd[1]), IRR_ind_lo = exp(cd[1] - 1.96*cd[2]), IRR_ind_hi = exp(cd[1] + 1.96*cd[2]),
+         OR_ind = exp(-zi[1]), OR_ind_lo = exp(-(zi[1] + 1.96*zi[2])), OR_ind_hi = exp(-(zi[1] - 1.96*zi[2])),
+         pdHess_ind = isTRUE(fit$sdr$pdHess))
+}
+
+all_res <- list()
+for (nm in NAMES) {
+  cat("\n=====", nm, "=====\n")
+  cache_f <- file.path(OUT_DIR, paste0("combined_", nm, "_v2.rds"))
+  if (!FORCE_REFIT && file.exists(cache_f)) {
+    cat("already done, skipping\n"); all_res[[nm]] <- readRDS(cache_f); next
+  }
+  r <- tryCatch({
+    d <- get_data(nm)
+    zf <- mean(d$ITEMS == 0); npos <- sum(d$ITEMS > 0)
+    cat("rows", nrow(d), "| zeros", round(100 * zf, 1), "% | positives", npos, "\n")
+    if (zf <= MIN_ZERO) stop("SKIP: no zeros in the sample, no zero stage")
+    if (npos < MIN_POS) stop("SKIP: too few positive months")
+
+    brms_row <- run_brms(nm, d, zf)
+    ind_row  <- run_glmm(nm, d)
+    bind_cols(brms_row, select(ind_row, -name)) %>%
+      mutate(IRR_pct_diff = (IRR / IRR_ind - 1) * 100,      # correlated vs independent
+             OR_pct_diff  = (OR_any / OR_ind - 1) * 100)
+  }, error = function(e) { cat("  ->", conditionMessage(e), "\n")
+                           tibble(level = LV, name = nm, note = conditionMessage(e)) })
+  all_res[[nm]] <- r
+  if (!"note" %in% names(r)) saveRDS(r, cache_f)
+  gc(verbose = FALSE)
+}
+
+res_all <- bind_rows(all_res)
+for (cc in c("note", "rho", "rho_lo", "rho_hi", "IRR"))
+  if (!cc %in% names(res_all)) res_all[[cc]] <- if (cc == "note") NA_character_ else NA_real_
+
+# ---- fill missing rho intervals from the saved brms fits ----
+for (i in seq_len(nrow(res_all))) {
+  if (is.na(res_all$IRR[i]) || (!is.na(res_all$rho_lo[i]) && !is.na(res_all$rho_hi[i]))) next
+  ff <- file.path(OUT_DIR, paste0("brms_", res_all$name[i], "_correlated_v2.rds"))
+  if (!file.exists(ff)) next
+  dr <- as_draws_df(readRDS(ff)); x <- dr[[grep("^cor_", variables(dr), value = TRUE)[1]]]
+  res_all$rho[i]    <- mean(x)
+  res_all$rho_lo[i] <- quantile(x, .025, names = FALSE)
+  res_all$rho_hi[i] <- quantile(x, .975, names = FALSE)
+}
+
+# ---- convergence flag ----
+res_all <- res_all %>%
+  mutate(converged = pmax(rhat_IRR, rhat_OR, rhat_rho) < RHAT_MAX &
+                     pmin(ess_IRR, ess_OR, ess_rho) > ESS_MIN & divergences == 0)
+
+settings <- tibble(setting = c("MODEL_DIR", "LV", "N_PRAC", "SEED", "CHAINS", "ITER", "ADAPT", "RHAT_MAX", "ESS_MIN", "run_date"),
+                   value   = c(MODEL_DIR, LV, N_PRAC, SEED, CHAINS, ITER, ADAPT, RHAT_MAX, ESS_MIN, as.character(Sys.Date())))
+xlsx_path <- file.path(OUT_DIR, "correlated_re_brms_ALL.xlsx")
+write_xlsx(list(results = res_all, settings = settings), path = xlsx_path)
+cat("Excel workbook saved to:", xlsx_path, "\n")
+print(res_all %>% select(any_of(c("name", "note", "pct_zero", "IRR", "IRR_ind", "OR_any", "OR_ind", "rho", "rho_lo", "rho_hi",
+                                  "rhat_IRR", "rhat_OR", "rhat_rho", "ess_IRR", "ess_OR", "ess_rho",
+                                  "divergences", "converged", "minutes"))) %>%
+        mutate(across(where(is.numeric), ~ round(.x, 3))), n = Inf, width = Inf)
+```
+
+# IMD Decile
+```{r IMD Decile}
+MODEL_DIR <- file.path(BASE_DIR, "Models", "Primary_NB2")
+OUT_DIR   <- file.path(BASE_DIR, "Models", "IMD_Decile_Sensitivity")
+dir.create(OUT_DIR, showWarnings = FALSE, recursive = TRUE)
+
+DEC_COL        <- "imd25_decile"
+REVERSE_DECILE <- TRUE            # official IMD: 1 = MOST deprived. TRUE flips so 10 = most deprived (matches imd25_scaled)
+
+MODELS <- unlist(lapply(c("disease", "drug_type", "individual"), function(lv) {
+  f <- list.files(file.path(MODEL_DIR, lv), pattern = "^model_.*\\.rds$")
+  if (length(f) == 0) return(NULL)
+  paste0(lv, "/", gsub("^model_|\\.rds$", "", f))
+}))
+
+N_CORES     <- 4
+FORCE_REFIT <- FALSE
+CATEGORICAL <- FALSE   # TRUE also fits decile as a factor (adds a second fit per model)
+
+# ---------- data prep: same as the model-fitting cells ----------
+parse_ym <- function(x) as.Date(paste0(substr(gsub("-", "", as.character(x)), 1, 6), "01"), "%Y%m%d")
+wdays <- function(d) {
+  days <- seq(d, ceiling_date(d, "month") - 1, by = "day")
+  hol  <- as.Date(holidayLONDON(year = year(d)))
+  sum(!(wday(days, week_start = 1) %in% c(6, 7)) & !(days %in% hol))
+}
+prep <- function(level, name) {
+  df <- read_parquet(file.path(FINAL_DIR, level, paste0(name, "_2level.parquet")))
+  df$date <- parse_ym(df$YEAR_MONTH_DATE)
+  df$PRACTICE_CODE <- factor(df$PRACTICE_CODE); df$ICB_CODE <- factor(df$ICB_CODE)
+  df$log_expected_cases <- log(df$EXPECTED_CASES)
+  df$log_exp_c <- df$log_expected_cases - mean(df$log_expected_cases)
+  mo <- df %>% distinct(month_index, date) %>% arrange(month_index) %>%
+    mutate(wd_c = map_dbl(date, wdays) - mean(map_dbl(date, wdays)),
+           t_c = as.numeric(scale(month_index)), t_c2 = t_c^2)
+  df <- left_join(df, select(mo, month_index, wd_c, t_c, t_c2), by = "month_index")
+  df$month_f <- factor(month(df$date))
+  df
+}
+
+# ---------- check the decile column before fitting anything ----------
+chk <- read_parquet(file.path(FINAL_DIR, "disease", "Dementia_2level.parquet"))
+print(names(chk))
+stopifnot(DEC_COL %in% names(chk))
+print(table(chk[[DEC_COL]], useNA = "ifany"))
+print(chk %>% group_by(PRACTICE_CODE) %>% summarise(n_dec = n_distinct(.data[[DEC_COL]])) %>% count(n_dec))  # want all 1
+rm(chk)
+
+pull_coef <- function(mod, term) {
+  s <- summary(mod)$coefficients
+  cd <- if (term %in% rownames(s$cond)) s$cond[term, ] else rep(NA_real_, 4)
+  zi <- if (!is.null(s$zi) && term %in% rownames(s$zi)) s$zi[term, ] else NULL
+  or <- if (is.null(zi)) rep(NA_real_, 3) else sort(exp(-(zi[1] + c(0, -1.96, 1.96) * zi[2])))[c(2, 1, 3)]
+  c(IRR = exp(cd[[1]]), IRR_lo = exp(cd[[1]] - 1.96 * cd[[2]]), IRR_hi = exp(cd[[1]] + 1.96 * cd[[2]]),
+    OR_any = or[1], OR_lo = or[2], OR_hi = or[3])
+}
+
+refit_decile <- function(spec) {
+  lv <- sub("/.*", "", spec); nm <- sub(".*/", "", spec)
+  cat("Starting", spec, "\n")
+
+  # formulas, family and primary estimate come from the saved model; the data are rebuilt from parquet
+  m   <- readRDS(file.path(MODEL_DIR, lv, paste0("model_", nm, ".rds")))
+  f_c <- formula(m); f_z <- formula(m, component = "zi"); fam <- family(m)
+  base <- pull_coef(m, "imd25_scaled"); n_primary <- nobs(m); rm(m); gc(verbose = FALSE)
+
+  fr <- prep(lv, nm)
+  if (nrow(fr) != n_primary) warning(spec, ": ", nrow(fr), " rows rebuilt vs ", n_primary, " in the primary model")
+
+  fr$imd_dec <- if (REVERSE_DECILE) 11 - fr[[DEC_COL]] else fr[[DEC_COL]]
+  stopifnot(!anyNA(fr$imd_dec))
+  fr$imd_dec_f <- factor(fr$imd_dec)
+
+  swap <- function(f, new) {
+    if (length(all.vars(f)) == 0) return(f)       # models with no zero stage
+    update(f, as.formula(paste("~ . - imd25_scaled +", new)))
+  }
+  ctl <- glmmTMBControl(optCtrl = list(iter.max = 1000, eval.max = 1000))
+
+  m_lin <- glmmTMB(update(f_c, as.formula("~ . - imd25_scaled + imd_dec")),
+                   ziformula = swap(f_z, "imd_dec"), family = fam, data = fr, control = ctl)
+  lin <- pull_coef(m_lin, "imd_dec")
+  out <- bind_rows(
+    tibble(level = lv, name = nm, fit = "primary (per 1 SD of IMD25)", pdHess = NA, !!!as.list(base)),
+    tibble(level = lv, name = nm, fit = "decile, linear (per decile)", pdHess = isTRUE(m_lin$sdr$pdHess), !!!as.list(lin)),
+    tibble(level = lv, name = nm, fit = "decile, linear (decile 10 vs 1)", pdHess = isTRUE(m_lin$sdr$pdHess),
+           IRR = lin[["IRR"]]^9, IRR_lo = lin[["IRR_lo"]]^9, IRR_hi = lin[["IRR_hi"]]^9,
+           OR_any = lin[["OR_any"]]^9, OR_lo = lin[["OR_lo"]]^9, OR_hi = lin[["OR_hi"]]^9)
+  )
+  rm(m_lin); gc(verbose = FALSE)
+
+  if (CATEGORICAL) {
+    m_cat <- glmmTMB(update(f_c, as.formula("~ . - imd25_scaled + imd_dec_f")),
+                     ziformula = swap(f_z, "imd_dec_f"), family = fam, data = fr, control = ctl)
+    cat10 <- pull_coef(m_cat, "imd_dec_f10")
+    out <- bind_rows(out, tibble(level = lv, name = nm, fit = "decile, categorical (10 vs 1)",
+                                 pdHess = isTRUE(m_cat$sdr$pdHess), !!!as.list(cat10)))
+  }
+  out
+}
+
+run_one <- function(spec) {
+  lv <- sub("/.*", "", spec); nm <- sub(".*/", "", spec)
+  cache <- file.path(OUT_DIR, lv, paste0("decile_", nm, ".rds"))
+  if (!FORCE_REFIT && file.exists(cache)) return(readRDS(cache))
+  r <- tryCatch(refit_decile(spec), error = function(e) { cat("FAILED", spec, conditionMessage(e), "\n"); NULL })
+  if (!is.null(r)) { dir.create(dirname(cache), showWarnings = FALSE, recursive = TRUE); saveRDS(r, cache) }
+  r
+}
+
+# ---- 2. run all ----
+res <- mclapply(MODELS, run_one, mc.cores = N_CORES, mc.preschedule = FALSE)
+out <- bind_rows(res)
+if (nrow(out) == 0) stop("All refits failed - check the serial test above")
+
+for (lv in unique(out$level)) {
+  d <- file.path(OUT_DIR, lv); dir.create(d, showWarnings = FALSE, recursive = TRUE)
+  write_xlsx(list(decile_sensitivity = filter(out, level == lv)),
+             file.path(d, paste0("imd_decile_sensitivity_", lv, ".xlsx")))
+}
+
+settings <- tibble(setting = c("MODEL_DIR", "DEC_COL", "REVERSE_DECILE", "CATEGORICAL", "run_date"),
+                   value   = c(MODEL_DIR, DEC_COL, as.character(REVERSE_DECILE),
+                               as.character(CATEGORICAL), as.character(Sys.Date())))
+xlsx_path <- file.path(OUT_DIR, "imd_decile_sensitivity_ALL.xlsx")
+write_xlsx(c(list(ALL = out),
+             setNames(lapply(unique(out$level), function(lv) filter(out, level == lv)), unique(out$level)),
+             list(settings = settings)),
+           path = xlsx_path)
+cat("Excel workbook saved to:", xlsx_path, "\n")
+```
+
+# W/O GPFTE_between 
+```{r}
+MODEL_DIR <- file.path(BASE_DIR, "Models", "Primary_NB2")
+OUT_ROOT  <- file.path(BASE_DIR, "Models", "Covariate_Sensitivity") 
+
+MODELS <- unlist(lapply(c("disease", "drug_type", "individual"), function(lv) {
+  f <- list.files(file.path(MODEL_DIR, lv), pattern = "^model_.*\\.rds$")
+  if (length(f) == 0) return(NULL)
+  paste0(lv, "/", gsub("^model_|\\.rds$", "", f))
+}))
+print(MODELS) 
+
+N_CORES     <- 4
+FORCE_REFIT <- FALSE      # FALSE = skip models already saved
+dir.create(OUT_ROOT, showWarnings = FALSE, recursive = TRUE)
+
+# ---------- helper ----------
+est_imd <- function(mod, label, drop) {
+  s <- summary(mod)$coefficients
+  cd <- s$cond["imd25_scaled", ]
+  zi <- if (!is.null(s$zi) && "imd25_scaled" %in% rownames(s$zi)) s$zi["imd25_scaled", ] else NULL
+  or <- if (is.null(zi)) rep(NA_real_, 3) else sort(exp(-(zi[1] + c(0, -1.96, 1.96) * zi[2])))[c(2, 1, 3)]
+  tibble(fit = label, dropped = drop, pdHess = isTRUE(mod$sdr$pdHess),
+         IRR = exp(cd[1]), IRR_lo = exp(cd[1] - 1.96 * cd[2]), IRR_hi = exp(cd[1] + 1.96 * cd[2]),
+         OR_any = or[1], OR_lo = or[2], OR_hi = or[3], logIRR = cd[1], logOR = if (is.null(zi)) NA_real_ else -zi[1])
+}
+
+refit_without <- function(spec, drop_term) {
+  lv <- sub("/.*", "", spec); nm <- sub(".*/", "", spec)
+  cat("Starting", spec, "without", drop_term, "\n")
+  m <- readRDS(file.path(MODEL_DIR, lv, paste0("model_", nm, ".rds")))
+  fr <- m$frame
+  for (oc in grep("^offset\\(", names(fr), value = TRUE))
+    names(fr)[names(fr) == oc] <- sub("^offset\\((.*)\\)$", "\\1", oc)
+  f_c <- formula(m); f_z <- formula(m, component = "zi"); fam <- family(m)
+  full <- est_imd(m, "full (primary)", "none"); rm(m); gc(verbose = FALSE)
+
+  f_c2 <- update(f_c, as.formula(paste(". ~ . -", drop_term)))
+  f_z2 <- if (length(all.vars(f_z)) > 0) update(f_z, as.formula(paste("~ . -", drop_term))) else f_z   # models with no zero stage
+  t0 <- Sys.time()
+  m2 <- glmmTMB(f_c2, ziformula = f_z2, family = fam, data = fr,
+                control = glmmTMBControl(optCtrl = list(iter.max = 1000, eval.max = 1000)))
+  cat(spec, ": refit took", round(as.numeric(difftime(Sys.time(), t0, units = "mins")), 1), "min\n")
+  red <- est_imd(m2, paste("without", drop_term), drop_term)
+  bind_rows(full, red) %>%
+    mutate(level = lv, name = nm, .before = 1,
+           pct_change_logIRR = 100 * (logIRR - logIRR[1]) / abs(logIRR[1]),
+           pct_change_logOR  = 100 * (logOR  - logOR[1])  / abs(logOR[1]))
+}
+
+run_drop <- function(drop_term, file_tag) {
+  drop_dir <- file.path(OUT_ROOT, file_tag)
+
+  run_one <- function(spec) {
+    lv <- sub("/.*", "", spec); nm <- sub(".*/", "", spec)
+    cache <- file.path(drop_dir, lv, paste0("sens_", nm, ".rds"))
+    if (!FORCE_REFIT && file.exists(cache)) return(readRDS(cache))
+    r <- tryCatch(refit_without(spec, drop_term),
+                  error = function(e) { cat("FAILED", spec, conditionMessage(e), "\n"); NULL })
+    if (!is.null(r)) { dir.create(dirname(cache), showWarnings = FALSE, recursive = TRUE); saveRDS(r, cache) }
+    r
+  }
+
+  res <- mclapply(MODELS, run_one, mc.cores = N_CORES, mc.preschedule = FALSE)
+  out <- bind_rows(res)
+  if (nrow(out) == 0) stop("All refits failed - test one serially: refit_without(MODELS[1], drop_term)")
+  out <- out %>% select(-any_of(c("logIRR", "logOR")))
+
+  for (lv in unique(out$level)) {                                   # one Excel file per level
+    d <- file.path(drop_dir, lv); dir.create(d, showWarnings = FALSE, recursive = TRUE)
+    write_xlsx(list(sensitivity = filter(out, level == lv)),
+               file.path(d, paste0("sensitivity_without_", file_tag, "_", lv, ".xlsx")))
+  }
+  settings <- tibble(setting = c("dropped_term", "MODEL_DIR", "run_date"),
+                     value   = c(drop_term, MODEL_DIR, as.character(Sys.Date())))
+  xlsx_path <- file.path(drop_dir, paste0("sensitivity_without_", file_tag, "_ALL.xlsx"))
+  write_xlsx(c(list(ALL = out),
+               setNames(lapply(unique(out$level), function(lv) filter(out, level == lv)), unique(out$level)),
+               list(settings = settings)),
+             path = xlsx_path)
+  cat("Excel workbook saved to:", xlsx_path, "\n")
+
+  failed <- setdiff(MODELS, paste0(out$level, "/", out$name))
+  if (length(failed) > 0) cat("\nModels with no result (failed):\n", paste(failed, collapse = "\n "), "\n")
+
+  options(width = 220, tibble.width = Inf)
+  print(out %>% mutate(across(where(is.numeric), ~ round(.x, 3))), n = Inf)
+  invisible(out)
+}
+
+
+res_fte <- run_drop("gpfte_practice_mean", "gpfte_between")
+```
+
+# W/O rurality
+```{r}
+res_rural <- run_drop("rural", "rural")
+```
+
+# Offset Proportionality
+```{r Offset Proportionality - runs on cached}
+
+OUT_DIR <- file.path(BASE_DIR, "Models", "Offset_Proportionality")
+
+LEVELS   <- c("disease", "drug_type", "individual")
+DATASETS <- NULL         # NULL = all, or e.g. c("AChEI", "MAOB_Inhibitors")
+
+FAMILY          <- "NB2"
+RE              <- "(1 | ICB_CODE/PRACTICE_CODE)"
+INCLUDE_NB_ONLY <- FALSE
+SPLIT           <- FALSE
+FORCE_REFIT     <- FALSE
+N_CORES         <- 4
+MIN_POS         <- 1000
+
+# =============================================================
+
+dir.create(OUT_DIR, recursive = TRUE, showWarnings = FALSE)
+CTRL <- glmmTMBControl(optCtrl = list(iter.max = 1000, eval.max = 1000))
+PRED <- c("imd25_scaled","rural","gpfte_practice_mean","gpfte_within","t_c","t_c2","wd_c","month_f")
+pr   <- paste(PRED, collapse = " + ")
+KEY  <- c("imd25_scaled", "rural", "gpfte_practice_mean", "gpfte_within")
+
+parse_ym <- function(x) as.Date(paste0(substr(gsub("-", "", as.character(x)), 1, 6), "01"), "%Y%m%d")
+wdays <- function(d) {
+  days <- seq(d, ceiling_date(d, "month") - 1, by = "day")
+  hol  <- as.Date(holidayLONDON(year = year(d)))
+  sum(!(wday(days, week_start = 1) %in% c(6, 7)) & !(days %in% hol))
+}
+prep <- function(level, name) {
+  df <- read_parquet(file.path(FINAL_DIR, level, paste0(name, "_2level.parquet")))
+  df$date <- parse_ym(df$YEAR_MONTH_DATE)
+  df$PRACTICE_CODE <- factor(df$PRACTICE_CODE); df$ICB_CODE <- factor(df$ICB_CODE)
+  df$log_expected_cases <- log(df$EXPECTED_CASES)
+  df$log_exp_c <- df$log_expected_cases - mean(df$log_expected_cases)
+  df$log_exp_b <- ave(df$log_exp_c, df$PRACTICE_CODE)          # practice mean of log expected cases
+  df$log_exp_w <- df$log_exp_c - df$log_exp_b                  # within-practice deviation
+  mo <- df %>% distinct(month_index, date) %>% arrange(month_index) %>%
+    mutate(wd_c = map_dbl(date, wdays) - mean(map_dbl(date, wdays)),
+           t_c = as.numeric(scale(month_index)), t_c2 = t_c^2)
+  df <- left_join(df, select(mo, month_index, wd_c, t_c, t_c2), by = "month_index")
+  df$month_f <- factor(month(df$date))
+  df
+}
+
+test_one <- function(level, name) {
+  df <- prep(level, name)
+  if (sum(df$ITEMS > 0) < MIN_POS) return(list(status = "skipped: too few positives"))
+  hurdle <- mean(df$ITEMS == 0) >= 0.01
+  if (!hurdle && !INCLUDE_NB_ONLY) return(list(status = "skipped: no hurdle (single NB model)"))
+  d <- if (hurdle) df[df$ITEMS > 0, ] else df            # part 2 of the hurdle = truncated NB on positive rows
+  fam <- if (hurdle) { if (FAMILY == "NB1") truncated_nbinom1 else truncated_nbinom2 }
+         else        { if (FAMILY == "NB1") nbinom1 else nbinom2 }
+  fit <- function(rhs) glmmTMB(as.formula(paste("ITEMS ~", rhs, "+", RE)), family = fam, data = d, control = CTRL)
+
+  m0 <- fit(paste(pr, "+ offset(log_expected_cases)"))   # offset only: elasticity fixed at 1 (null model)
+  m1 <- fit(paste(pr, "+ log_exp_c"))                    # NO offset: log expected cases as a free covariate
+  s1 <- summary(m1)$coefficients$cond
+  b  <- s1["log_exp_c", 1]; se <- s1["log_exp_c", 2]      # b = elasticity of volume w.r.t. expected cases
+  lrt <- 2 * (as.numeric(logLik(m1)) - as.numeric(logLik(m0)))   # m0 is m1 with b fixed at 1 (nested)
+
+  main <- tibble(level = level, name = name, family = FAMILY, hurdle_count_part = hurdle, n = nrow(d),
+                 pdHess_offset = isTRUE(m0$sdr$pdHess), pdHess_free = isTRUE(m1$sdr$pdHess),
+                 elasticity = b, se = se, ci_lo = b - 1.96 * se, ci_hi = b + 1.96 * se,
+                 z_vs_1 = (b - 1) / se, p_wald = 2 * pnorm(-abs((b - 1) / se)),
+                 LRT_chisq = lrt, p_LRT = pchisq(lrt, 1, lower.tail = FALSE),
+                 AIC_offset = AIC(m0), AIC_free = AIC(m1), dAIC_free_minus_offset = AIC(m1) - AIC(m0),
+                 pct_change_per_10pct_expected = (1.1^b - 1) * 100)
+
+  # do the substantive covariates change when the offset is replaced by a free covariate?
+  k0 <- summary(m0)$coefficients$cond[KEY, , drop = FALSE]
+  k1 <- summary(m1)$coefficients$cond[KEY, , drop = FALSE]
+  cmp <- tibble(level = level, name = name, term = KEY,
+                est_offset_only = k0[, 1], se_offset_only = k0[, 2], p_offset_only = k0[, 4],
+                est_free_covariate = k1[, 1], se_free_covariate = k1[, 2], p_free_covariate = k1[, 4],
+                diff = k1[, 1] - k0[, 1], pct_diff = 100 * (k1[, 1] - k0[, 1]) / abs(k0[, 1]))
+
+  spl <- NULL
+  if (SPLIT) {
+    m2 <- fit(paste(pr, "+ log_exp_b + log_exp_w"))      # no offset
+    s2 <- summary(m2)$coefficients$cond
+    spl <- tibble(level = level, name = name, component = c("between practices", "within practice"),
+                  elasticity = s2[c("log_exp_b", "log_exp_w"), 1], se = s2[c("log_exp_b", "log_exp_w"), 2]) %>%
+      mutate(z_vs_1 = (elasticity - 1) / se, p_vs_1 = 2 * pnorm(-abs(z_vs_1)))
+  }
+  list(status = "ok", main = main, cmp = cmp, split = spl)
+}
+
+jobs <- do.call(rbind, lapply(LEVELS, function(lv) {
+  nm <- sub("_2level.parquet$", "", list.files(file.path(FINAL_DIR, lv), pattern = "_2level.parquet$"))
+  if (!is.null(DATASETS)) nm <- intersect(nm, DATASETS)
+  if (length(nm) == 0) return(NULL)
+  data.frame(lv = lv, nm = nm, stringsAsFactors = FALSE)
+}))
+stopifnot(!is.null(jobs), nrow(jobs) > 0)
+
+run_job <- function(i) {
+  cache <- file.path(OUT_DIR, jobs$lv[i], paste0("offset2cov_", jobs$nm[i], ".rds"))
+  if (!FORCE_REFIT && file.exists(cache)) return(readRDS(cache))
+  r <- tryCatch(test_one(jobs$lv[i], jobs$nm[i]), error = function(e) list(status = paste0("FAILED: ", conditionMessage(e))))
+  if (identical(r$status, "ok")) {
+    dir.create(dirname(cache), recursive = TRUE, showWarnings = FALSE)
+    saveRDS(r, cache)
+  }
+  r
+}
+
+out <- mclapply(seq_len(nrow(jobs)), run_job, mc.cores = N_CORES, mc.preschedule = FALSE)
+jobs$status <- vapply(out, function(o) if (is.list(o)) o$status else "worker error", "")
+print(jobs, row.names = FALSE)
+
+ok <- out[jobs$status == "ok"]
+res <- list(offset_test = bind_rows(map(ok, "main")),
+            covariate_change = bind_rows(map(ok, "cmp")),
+            run_status = jobs)
+if (SPLIT) res$between_within <- bind_rows(map(ok, "split"))
+write_xlsx(res, file.path(OUT_DIR, "Offset_proportionallity.xlsx"))
+
+print(as.data.frame(res$offset_test[, c("level","name","elasticity","ci_lo","ci_hi","z_vs_1","p_LRT","dAIC_free_minus_offset")]), row.names = FALSE)
+cat("\nLargest % change in a key covariate when the offset is replaced by a free covariate:\n")
+```
