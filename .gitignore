@@ -4,3 +4,4 @@ Data/Raw/ONS/
 Data/Raw/GP_REG/
 Data/Raw/gpwf/
 *.rds
+!results_*.rds
