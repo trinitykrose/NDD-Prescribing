@@ -1,0 +1,7 @@
+.DS_Store
+.Rhistory
+Data/Raw/
+Data/Interim/
+Data/Processed/
+Data/Merged/
+*.rds
