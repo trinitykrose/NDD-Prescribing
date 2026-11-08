@@ -1,5 +1,5 @@
 # NDD-Prescribing
-# Practice-level prescribing of neurodegenerative drugs in English general practice
+Practice-level prescribing of neurodegenerative drugs in English general practice
 
 Multilevel count models of monthly GP-practice prescribing, using NHS open data.
 Practices are nested within ICBs, and models are fitted by disease, drug type
@@ -25,14 +25,20 @@ Run in order. Notebooks are Python, the modelling file is R.
 - NHS Digital: Patients Registered at a GP Practice; General and Personal Medical Services (workforce)
 - Index of Multiple Deprivation (IMD 2025), ONS Postcode Directory (ONSPD), ONS GeoJSON boundaries
 
-All data is downloaded by the notebooks and is also included in this repo
-(`Data/`) so results can be reproduced without re-downloading.
+
+Most data is included in this repo (`Data/`). Large files are in GitHub Releases:
+
+- [Raw data (v1.0-data)](https://github.com/trinitykrose/NDD-Prescribing/releases/tag/v1.0-data): `raw_ONS.zip`, `raw_GP_REG.zip`, `raw_gpwf.zip`. Unzip into `Data/Raw/`.
+- [Model fits (v1.0)](https://github.com/trinitykrose/NDD-Prescribing/releases/tag/v1.0): `models_*.zip` (all `.rds` fits). Unzip into the repository root so the `Models/` folders line up.
+
+The raw data can also be re-created by running notebooks 1 to 3.
+
 
 ## Folder structure
 
 ```
 Data/
-  Raw/         source files as downloaded (incl. ONS, GeoJSON)
+  Raw/         source files as downloaded. ONS/, GP_REG/ and gpwf/ are in the v1.0-data release, not in this repo
   Interim/     intermediate files from merging EPD years
   Processed/   cleaned single-source files (e.g. bnf_processed.csv, parquet files)
   Merged/      grid_presc_gp.parquet, df_full_floors.parquet
@@ -40,12 +46,12 @@ Data/
     disease/       <name>_2level.parquet
     drug_type/     <name>_2level.parquet
     individual/    <name>_2level.parquet
-Models/
+Models/        (model_*.rds fits are in the v1.0 release, not in this repo)
   Primary_NB2/              primary models (<level>/ model_*.rds, results_*.rds, NB2_<level>_results.xlsx)
   Primary_NB1/              NB1 sensitivity
   Primary_Poisson/          Poisson sensitivity (Apomorphine only)
   AR1_NB2/                  AR(1) sensitivity
-  Offset_Proportionality/  offset proportionality check
+  Offset_Proportionality/   offset proportionality check
   Covariate_Sensitivity/    models without rurality / GP FTE
   IMD_Decile_Sensitivity/   IMD decile in place of scaled IMD
   Correlated_RE_brms/       correlated random intercepts (brms)
@@ -66,10 +72,11 @@ Outcome is monthly items per practice, with `log(expected cases)` as an offset.
 - **Sensitivity:** NB1, Poisson, AR(1) practice-level errors, offset proportionality, dropping rurality or GP FTE, IMD decile, correlated random effects (`brms`)
 - **Diagnostics:** VIF/GVIF, zero calibration, residual ACF, random-effect normality and correlations, variance partition coefficients (VPC)
 
-## Outputs
 
+## Outputs
 - `Data/Final/<level>/<name>_2level.parquet`: modelling datasets
-- `Models/*/`: fitted models (`.rds`) and Excel results (diagnostics, coefficients, VPCs)
+- `Models/*/`: Excel results (diagnostics, coefficients, VPCs), diagnostic plots and `results_*.rds` summaries
+- Fitted model objects (`model_*.rds` and other `.rds` fits): not stored in the repository because of their size. They are in the [v1.0 release](https://github.com/trinitykrose/NDD-Prescribing/releases/tag/v1.0) as `models_*.zip`. Unzip them into the repository root so they sit alongside the results files.
 - `Tables/`: descriptives, GVIF, primary model and sensitivity tables (`.tex`)
 - `Figures/Choropleth_maps`: choropleth maps (`.png`, `.pdf`)
 
@@ -81,8 +88,9 @@ Outcome is monthly items per practice, with `log(expected cases)` as an offset.
 
 ## Setup
 
-1. Set `BASE_DIR` at the top of each notebook and in `5_modelling.rmd` to your folder.
-2. Run notebooks 1 to 4, then `5_modelling.rmd`, then notebook 6.
+1. Optional: download and unzip the release files (see Data sources above) if you want to reuse the existing data and model fits instead of re-creating them.
+2. Set `BASE_DIR` at the top of each notebook and in `5_modelling.rmd` to your folder.
+3. Run notebooks 1 to 4, then `5_modelling.rmd`, then notebook 6.
 
 ## Notes
 
@@ -91,4 +99,8 @@ Outcome is monthly items per practice, with `log(expected cases)` as an offset.
 - Model fits are cached as `.rds`. Set `FORCE_REFIT <- TRUE` to refit.
 - Poisson was only run for apomorphine, to check convergence
 - The `brms` models need CmdStan installed (`cmdstanr::install_cmdstan()`).
-- Full runs are slow. Adjust `N_CORES`
+
+## Re-fitting the models
+1. Unzip the model fits from the release (above) so existing fits are in `Models/`.
+2. In `5_modelling.rmd`, set `FORCE_REFIT <- TRUE` to overwrite them, or leave it `FALSE` to reuse the cached fits.
+3. Knit or run chunk by chunk. Adjust `N_CORES` in the setup chunk.
